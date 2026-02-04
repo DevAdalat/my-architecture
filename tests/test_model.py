@@ -121,13 +121,16 @@ class TestACT:
         act = AdaptiveComputeTime(config)
         initial = torch.randn(2, 128, config.hidden_dim)
 
-        def step_fn(x: torch.Tensor) -> torch.Tensor:
-            return x + 0.1
+        # New API: init_state -> step -> finalize
+        acc = act.init_state(2, 128, config.hidden_dim, initial.device, initial.dtype)
 
-        def halt_fn(x: torch.Tensor) -> torch.Tensor:
-            return torch.sigmoid(x.mean(dim=-1, keepdim=True))
+        state = initial
+        for step_idx in range(config.max_reasoning_steps):
+            halt_prob = torch.sigmoid(state.mean(dim=-1))
+            acc = act.step(state, halt_prob, acc, step_idx)
+            state = state + 0.1
 
-        final, ponder, halted = act(initial, step_fn, halt_fn)
+        final, ponder, halted = act.finalize(state, acc)
 
         assert final.shape == initial.shape
         assert ponder.shape == (2, 128)
