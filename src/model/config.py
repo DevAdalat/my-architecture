@@ -88,11 +88,11 @@ class DPSNRConfig:
         self.grammar_size = self.pool_size - self.knowledge_size - self.reasoning_size
 
     @classmethod
-    def from_preset(cls, preset: Literal["nano", "tiny", "small", "base"]) -> "DPSNRConfig":
+    def from_preset(cls, preset: Literal["nano", "mini", "tiny", "small", "base"]) -> "DPSNRConfig":
         """Create config from a preset.
 
         Args:
-            preset: One of 'nano', 'tiny', 'small', or 'base'.
+            preset: One of 'nano', 'mini', 'tiny', 'small', or 'base'.
 
         Returns:
             DPSNRConfig with preset values.
@@ -114,6 +114,21 @@ class DPSNRConfig:
                 "top_k": 128,
                 "retrieval_dim": 128,
                 "max_reasoning_steps": 4,
+                "dropout": 0.0,
+            },
+            "mini": {
+                "vocab_size": 512,
+                "max_seq_len": 256,
+                "hidden_dim": 256,
+                "num_layers": 3,
+                "num_heads": 4,
+                "head_dim": 64,
+                "intermediate_dim": 1024,
+                "pool_size": 8192,
+                "pool_dim": 256,
+                "top_k": 256,
+                "retrieval_dim": 128,
+                "max_reasoning_steps": 6,
                 "dropout": 0.0,
             },
             "tiny": {
