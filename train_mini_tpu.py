@@ -22,7 +22,7 @@ from src.data.synthetic import collate_fn, create_data_splits
 from src.model import DPSNR, DPSNRConfig
 
 try:
-    import torch_xla
+    import torch_xla  # noqa: F401
     import torch_xla.core.xla_model as xm
     import torch_xla.distributed.parallel_loader as pl
 
@@ -30,6 +30,52 @@ try:
 except ImportError:
     HAS_XLA = False
     print("WARNING: torch_xla not available. Falling back to CPU/CUDA.")
+
+
+def format_params(num_params: int) -> str:
+    """Format parameter count as M (millions) or B (billions)."""
+    if num_params >= 1e9:
+        return f"{num_params / 1e9:.2f}B"
+    elif num_params >= 1e6:
+        return f"{num_params / 1e6:.2f}M"
+    elif num_params >= 1e3:
+        return f"{num_params / 1e3:.2f}K"
+    else:
+        return str(num_params)
+
+
+def verify_device_placement(model: torch.nn.Module, device: torch.device) -> None:
+    """Verify model parameters and sample tensors are on expected device."""
+    sync_print("\n" + "-" * 40)
+    sync_print("Device Placement Verification")
+    sync_print("-" * 40)
+
+    param = next(model.parameters())
+    param_device = str(param.device)
+
+    if HAS_XLA:
+        import torch_xla.core.xla_model as xm
+
+        expected = "xla:0"
+        is_tpu = "xla" in param_device.lower()
+        status = "OK - Running on TPU" if is_tpu else "WARNING - NOT on TPU!"
+    else:
+        expected = str(device)
+        is_tpu = False
+        status = f"OK - Running on {device.type.upper()}"
+
+    sync_print(f"  Expected device: {expected}")
+    sync_print(f"  Actual param device: {param_device}")
+    sync_print(f"  Status: {status}")
+
+    test_tensor = torch.randn(2, 2, device=device)
+    sync_print(f"  Test tensor device: {test_tensor.device}")
+
+    if HAS_XLA:
+        xm.mark_step()
+        sync_print(f"  XLA device type: {xm.xla_device_hw(device)}")
+
+    sync_print("-" * 40)
 
 
 def get_device():
@@ -156,10 +202,15 @@ def main():
     # Create model
     model = DPSNR(config).to(device)
     param_counts = model.count_parameters()
+
     sync_print("\nParameter Counts:")
-    sync_print(f"  Controller: {param_counts['controller']:,}")
-    sync_print(f"  Pool: {param_counts['pool']:,}")
-    sync_print(f"  Total: {param_counts['total']:,}")
+    sync_print(
+        f"  Controller: {param_counts['controller']:,} ({format_params(param_counts['controller'])})"
+    )
+    sync_print(f"  Pool: {param_counts['pool']:,} ({format_params(param_counts['pool'])})")
+    sync_print(f"  Total: {param_counts['total']:,} ({format_params(param_counts['total'])})")
+
+    verify_device_placement(model, device)
 
     # Create datasets
     sync_print("\nCreating synthetic datasets...")
