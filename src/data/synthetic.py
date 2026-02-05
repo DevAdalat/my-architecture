@@ -146,6 +146,61 @@ class AlternatePattern(PatternGenerator):
         return SyntheticSample(input_ids, labels, "alternate")
 
 
+class AssociativeRecallPattern(PatternGenerator):
+    """
+    Associative Recall Task (Key-Value Retrieval).
+    Format: k1 v1 k2 v2 ... ? query_key -> target_value
+    Tests the model's ability to store mappings in memory (Pool) and retrieve them.
+    """
+
+    def __init__(self, vocab_size: int, seq_len: int):
+        super().__init__(vocab_size, seq_len)
+        self.seq_len = seq_len  # Explicitly store for usage
+        # -2 for query/separator, //2 for pairs. Ensure integer math.
+        self.num_pairs = int((seq_len - 2) // 2)
+
+    def generate(self) -> SyntheticSample:
+        # Generate random keys and values
+        # Keys must be unique to avoid ambiguity
+        # We reserve 0 for padding, 1 for separator '?'
+        available_tokens = torch.arange(2, self.vocab_size)
+
+        # Select 2*num_pairs tokens (keys and values)
+        # To ensure keys are unique, we pick num_pairs keys
+        # Use int cast for slice index
+        perm = torch.randperm(len(available_tokens))
+        keys = available_tokens[perm[: int(self.num_pairs)]]
+        values = torch.randint(2, self.vocab_size, (int(self.num_pairs),))
+
+        # Create input sequence: k1 v1 k2 v2 ...
+        seq = torch.empty(self.seq_len, dtype=torch.long).fill_(0)
+
+        # Interleave keys and values
+        # Use explicit int slicing
+        limit = int(self.num_pairs * 2)
+        seq[0:limit:2] = keys
+        seq[1:limit:2] = values
+
+        # Choose a query key from the keys we used
+        query_idx = torch.randint(0, int(self.num_pairs), (1,)).item()
+        query_key = keys[query_idx]
+        target_val = values[query_idx]
+
+        # Add query at the end: ... ? query_key
+        # Let's put the separator at the second to last position
+        seq[-2] = 1  # Separator
+        seq[-1] = query_key
+
+        # Targets
+        target_val_tensor = target_val.unsqueeze(0) if target_val.ndim == 0 else target_val
+
+        full_seq = torch.cat([seq, target_val_tensor])
+        input_ids = full_seq[:-1].tolist()
+        labels = full_seq[1:].tolist()
+
+        return SyntheticSample(input_ids, labels, "associative_recall")
+
+
 class SyntheticDataset(Dataset):
     """Dataset of mixed algorithmic patterns."""
 
@@ -163,10 +218,11 @@ class SyntheticDataset(Dataset):
         self.generators = [
             CopyPattern(vocab_size, max_seq_len),
             ReversePattern(vocab_size, max_seq_len),
-            RepeatPattern(vocab_size, max_seq_len, repeats=2),
+            RepeatPattern(vocab_size, max_seq_len),
             SortPattern(vocab_size, max_seq_len),
             ArithmeticPattern(vocab_size, max_seq_len),
             AlternatePattern(vocab_size, max_seq_len),
+            AssociativeRecallPattern(vocab_size, max_seq_len),
         ]
 
         random.seed(seed)
