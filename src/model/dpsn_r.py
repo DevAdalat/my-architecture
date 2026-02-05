@@ -14,25 +14,14 @@ import torch.nn.functional as F
 from .act import AdaptiveComputeTime, compute_ponder_loss
 from .config import DPSNRConfig
 from .controller import TinyController
-from .pool import MassivePool, PhaseType
+from .pool import MassivePool
 
 
 class DPSNR(nn.Module):
     """Dynamic Parameter Selection Network with Recurrent Reasoning.
 
-    XLA-Optimized: Uses explicit loop unrolling, no callbacks.
+    XLA-Optimized: Uses explicit loop unrolling, direct partition calls.
     """
-
-    PHASE_SCHEDULE: list[PhaseType] = [
-        "knowledge",
-        "knowledge",
-        "reasoning",
-        "reasoning",
-        "reasoning",
-        "reasoning",
-        "grammar",
-        "grammar",
-    ]
 
     def __init__(self, config: DPSNRConfig) -> None:
         super().__init__()
@@ -42,24 +31,27 @@ class DPSNR(nn.Module):
         self.pool = MassivePool(config)
         self.act = AdaptiveComputeTime(config)
 
-        while len(self.PHASE_SCHEDULE) < config.max_reasoning_steps:
-            self.PHASE_SCHEDULE.append("grammar")
-
-        self._phase_list = self.PHASE_SCHEDULE[: config.max_reasoning_steps]
-
     @classmethod
     def from_preset(cls, preset: str) -> "DPSNR":
         config = DPSNRConfig.from_preset(preset)  # type: ignore[arg-type]
         return cls(config)
 
-    def _reasoning_step(
-        self,
-        hidden: torch.Tensor,
-        phase: PhaseType,
-    ) -> torch.Tensor:
-        """Single reasoning step with fixed phase (no dynamic lookup)."""
+    def _step_knowledge(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Reasoning step targeting knowledge partition."""
         query = self.controller.generate_query(hidden)
-        retrieved = self.pool.retrieve(query, phase=phase)
+        retrieved = self.pool.retrieve_knowledge(query)
+        return self.controller.integrate(hidden, retrieved)
+
+    def _step_reasoning(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Reasoning step targeting reasoning partition."""
+        query = self.controller.generate_query(hidden)
+        retrieved = self.pool.retrieve_reasoning(query)
+        return self.controller.integrate(hidden, retrieved)
+
+    def _step_grammar(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Reasoning step targeting grammar partition."""
+        query = self.controller.generate_query(hidden)
+        retrieved = self.pool.retrieve_grammar(query)
         return self.controller.integrate(hidden, retrieved)
 
     def forward(
@@ -81,50 +73,50 @@ class DPSNR(nn.Module):
                 hidden.dtype,
             )
 
-            # UNROLLED LOOP - each iteration is a static graph node
+            # UNROLLED LOOP - each step calls partition method directly
             # Step 0: knowledge phase
             halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
             acc = self.act.step(hidden, halt_prob, acc, 0)
-            hidden = self._reasoning_step(hidden, "knowledge")
+            hidden = self._step_knowledge(hidden)
 
             # Step 1: knowledge phase
             halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
             acc = self.act.step(hidden, halt_prob, acc, 1)
-            hidden = self._reasoning_step(hidden, "knowledge")
+            hidden = self._step_knowledge(hidden)
 
             # Step 2: reasoning phase
             halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
             acc = self.act.step(hidden, halt_prob, acc, 2)
-            hidden = self._reasoning_step(hidden, "reasoning")
+            hidden = self._step_reasoning(hidden)
 
             # Step 3: reasoning phase
             halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
             acc = self.act.step(hidden, halt_prob, acc, 3)
-            hidden = self._reasoning_step(hidden, "reasoning")
+            hidden = self._step_reasoning(hidden)
 
             # Step 4: reasoning phase (for max_steps >= 5)
             if self.config.max_reasoning_steps >= 5:
                 halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
                 acc = self.act.step(hidden, halt_prob, acc, 4)
-                hidden = self._reasoning_step(hidden, "reasoning")
+                hidden = self._step_reasoning(hidden)
 
             # Step 5: reasoning phase (for max_steps >= 6)
             if self.config.max_reasoning_steps >= 6:
                 halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
                 acc = self.act.step(hidden, halt_prob, acc, 5)
-                hidden = self._reasoning_step(hidden, "reasoning")
+                hidden = self._step_reasoning(hidden)
 
             # Step 6: grammar phase (for max_steps >= 7)
             if self.config.max_reasoning_steps >= 7:
                 halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
                 acc = self.act.step(hidden, halt_prob, acc, 6)
-                hidden = self._reasoning_step(hidden, "grammar")
+                hidden = self._step_grammar(hidden)
 
             # Step 7: grammar phase (for max_steps >= 8)
             if self.config.max_reasoning_steps >= 8:
                 halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
                 acc = self.act.step(hidden, halt_prob, acc, 7)
-                hidden = self._reasoning_step(hidden, "grammar")
+                hidden = self._step_grammar(hidden)
 
             hidden, ponder_cost, _ = self.act.finalize(hidden, acc)
         else:
@@ -135,8 +127,19 @@ class DPSNR(nn.Module):
                 dtype=hidden.dtype,
             )
 
-            for step_idx, phase in enumerate(self._phase_list):
-                hidden = self._reasoning_step(hidden, phase)
+            # Fixed steps without ACT - use direct partition calls
+            hidden = self._step_knowledge(hidden)
+            hidden = self._step_knowledge(hidden)
+            hidden = self._step_reasoning(hidden)
+            hidden = self._step_reasoning(hidden)
+            if self.config.max_reasoning_steps >= 5:
+                hidden = self._step_reasoning(hidden)
+            if self.config.max_reasoning_steps >= 6:
+                hidden = self._step_reasoning(hidden)
+            if self.config.max_reasoning_steps >= 7:
+                hidden = self._step_grammar(hidden)
+            if self.config.max_reasoning_steps >= 8:
+                hidden = self._step_grammar(hidden)
 
         logits = self.controller.decode(hidden)
 
