@@ -54,6 +54,9 @@ def generate_dummy_data(config, samples=1000):
     return TensorDataset(input_ids, labels)
 
 
+import time
+
+
 def train():
     # 1. Setup Distributed Environment
     device, local_rank = setup_distributed()
@@ -63,6 +66,8 @@ def train():
     print(f"[Rank {global_rank}] Initializing... Device: {device}")
 
     # 2. Configuration
+    # NOTE: This configuration creates a small ~63M parameter model for testing.
+    # To train your full 3B model, increase hidden_dim (~4096), pool_size, etc.
     config = DPSNRConfig(
         vocab_size=50257,
         hidden_dim=512,
@@ -77,6 +82,17 @@ def train():
 
     # 3. Model Initialization
     model = DPSNR(config).to(device)
+
+    # Calculate Model Size
+    total_params = sum(p.numel() for p in model.parameters())
+    pool_params = sum(p.numel() for p in model.pool.parameters())
+    if global_rank == 0:
+        print(f"\n{'=' * 40}")
+        print(f"Model Configuration")
+        print(f"Total Parameters: {total_params / 1e6:.2f}M")
+        print(f"Pool Parameters:  {pool_params / 1e6:.2f}M (Sharded across {world_size} GPUs)")
+        print(f"Controller Params: {(total_params - pool_params) / 1e6:.2f}M")
+        print(f"{'=' * 40}\n")
 
     # 4. Enable Custom Tensor Parallelism for the Pool
     print(f"[Rank {global_rank}] Sharding Massive Pool...")
@@ -100,6 +116,27 @@ def train():
     model.train()
 
     print(f"[Rank {global_rank}] Starting Training Loop...")
+
+    # Metrics
+    seq_len = 128
+    batch_size = 16
+    recurrent_steps = 8  # Default for DPSN-R
+
+    # Calculate Theoretical Bandwidth per Step (Forward Only)
+    # We gather (Scores + Indices + Vectors) for (WorldSize * K) candidates
+    # Done 'recurrent_steps' times per forward pass
+    # Scores: Float32 (4 bytes), Indices: Int64 (8 bytes), Vectors: Float32 (4 bytes * dim)
+    candidates_per_step = world_size * config.top_k
+    bytes_scores = candidates_per_step * 4
+    bytes_indices = candidates_per_step * 8
+    bytes_vectors = candidates_per_step * config.pool_dim * 4
+
+    payload_per_token_pass = bytes_scores + bytes_indices + bytes_vectors
+    total_bytes_per_step_fwd = payload_per_token_pass * batch_size * seq_len * recurrent_steps
+    # Backward pass usually involves similar or double traffic for gradients
+    total_bytes_per_step_est = total_bytes_per_step_fwd * 2
+
+    t0 = time.time()
 
     for epoch in range(1):
         sampler.set_epoch(epoch)
@@ -134,7 +171,28 @@ def train():
             optimizer.step()
 
             if step % 10 == 0 and global_rank == 0:
-                print(f"Epoch {epoch} | Step {step} | Loss: {loss.item():.4f}")
+                t1 = time.time()
+                dt = t1 - t0
+                t0 = t1
+
+                # Calculate Metrics
+                if step == 0:
+                    dt = 1.0  # Avoid div/0 on first step
+
+                # 10 steps elapsed (except first)
+                steps_elapsed = 10 if step > 0 else 1
+
+                tps = (batch_size * seq_len * steps_elapsed) / dt
+
+                # Bandwidth (MB/s)
+                mb_moved = (total_bytes_per_step_est * steps_elapsed) / 1e6
+                mbps = mb_moved / dt
+
+                print(
+                    f"Ep {epoch} | Step {step:3d} | Loss: {loss.item():.4f} | "
+                    f"TPS: {tps:7.1f} tok/s | "
+                    f"Comm: {mbps:6.1f} MB/s (Est)"
+                )
 
     print(f"[Rank {global_rank}] Training Complete.")
     cleanup_distributed()
