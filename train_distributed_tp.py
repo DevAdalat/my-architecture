@@ -66,7 +66,7 @@ def train():
         head_dim=32,
         pool_size=1024,
         pool_dim=128,  # Must be multiple of 128
-        top_k=32,  # Small k for sparse fetch
+        top_k=128,  # Small k for sparse fetch (Multiple of 128)
         # Partition ratios (not sizes)
         knowledge_ratio=0.5,
         reasoning_ratio=0.3,
