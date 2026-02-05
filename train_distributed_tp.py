@@ -17,6 +17,9 @@ from torch.utils.data.dataset import TensorDataset
 
 from src.model.config import DPSNRConfig
 from src.model.dpsn_r import DPSNR
+from src.data.synthetic import SyntheticDataset, collate_fn
+from functools import partial
+import time
 
 
 def setup_distributed():
@@ -46,17 +49,6 @@ def cleanup_distributed():
     dist.destroy_process_group()
 
 
-def generate_dummy_data(config, samples=1000):
-    """Generate dummy data for testing training loop."""
-    # Vocab size assumption: 50257 (GPT-2 style)
-    input_ids = torch.randint(0, 50257, (samples, 128))
-    labels = torch.randint(0, 50257, (samples, 128))
-    return TensorDataset(input_ids, labels)
-
-
-import time
-
-
 def train():
     # 1. Setup Distributed Environment
     device, local_rank = setup_distributed()
@@ -66,18 +58,19 @@ def train():
     print(f"[Rank {global_rank}] Initializing... Device: {device}")
 
     # 2. Configuration
-    # NOTE: This configuration creates a small ~63M parameter model for testing.
-    # To train your full 3B model, increase hidden_dim (~4096), pool_size, etc.
+    # NOTE: Mini configuration for testing with Synthetic Data
     config = DPSNRConfig(
-        vocab_size=50257,
-        hidden_dim=512,
-        pool_size=100000,  # Large pool
-        pool_dim=256,
-        top_k=128,  # Must be multiple of 128
+        vocab_size=1000,
+        hidden_dim=128,
+        num_heads=4,
+        head_dim=32,
+        pool_size=1024,
+        pool_dim=128,  # Must be multiple of 128
+        top_k=32,  # Small k for sparse fetch
         # Partition ratios (not sizes)
-        knowledge_ratio=0.7,
-        reasoning_ratio=0.2,
-        grammar_ratio=0.1,
+        knowledge_ratio=0.5,
+        reasoning_ratio=0.3,
+        grammar_ratio=0.2,
     )
 
     # 3. Model Initialization
@@ -108,9 +101,11 @@ def train():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     # 7. Data Loader
-    dataset = generate_dummy_data(config)
+    # Use Synthetic Data with Associative Recall
+    dataset = SyntheticDataset(num_samples=1000, vocab_size=1000, max_seq_len=32)
+    collate = partial(collate_fn, max_len=32)
     sampler = DistributedSampler(dataset)
-    dataloader = DataLoader(dataset, batch_size=16, sampler=sampler)
+    dataloader = DataLoader(dataset, batch_size=16, sampler=sampler, collate_fn=collate)
 
     # 8. Training Loop
     model.train()
@@ -118,7 +113,7 @@ def train():
     print(f"[Rank {global_rank}] Starting Training Loop...")
 
     # Metrics
-    seq_len = 128
+    seq_len = 32  # Matches max_seq_len
     batch_size = 16
     recurrent_steps = 8  # Default for DPSN-R
 
@@ -140,8 +135,10 @@ def train():
 
     for epoch in range(1):
         sampler.set_epoch(epoch)
-        for step, (inputs, targets) in enumerate(dataloader):
-            inputs, targets = inputs.to(device), targets.to(device)
+        for step, batch in enumerate(dataloader):
+            # Unpack dict batch from collate_fn
+            inputs = batch["input_ids"].to(device)
+            targets = batch["labels"].to(device)
 
             optimizer.zero_grad()
 
