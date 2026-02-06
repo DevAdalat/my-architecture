@@ -1,13 +1,13 @@
 """HuggingFace dataset loader for DPSN-R."""
 
-from typing import Any
 from functools import partial
+from typing import Any
 
 import torch
-from torch.nn.utils.rnn import pad_sequence
 from datasets import load_dataset
-from transformers import AutoTokenizer
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
+from transformers import AutoTokenizer
 
 from src.data.tokenizer import CharTokenizer
 from src.utils.config_loader import DatasetConfig, TrainingConfig

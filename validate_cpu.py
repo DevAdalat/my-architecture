@@ -4,15 +4,16 @@ Trains a small model on synthetic data (including Associative Recall) to verify 
 Runs on CPU/CUDA (Standard PyTorch).
 """
 
+import time
+from functools import partial
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-import time
 
+from src.data.synthetic import SyntheticDataset, collate_fn
 from src.model.config import DPSNRConfig
 from src.model.dpsn_r import DPSNR
-from src.data.synthetic import SyntheticDataset, collate_fn
-from functools import partial
 
 
 def validate():

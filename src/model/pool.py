@@ -179,11 +179,6 @@ class MassivePool(nn.Module):
         # Find the global top-k from the candidates
         final_scores, best_candidate_indices = torch.topk(all_scores, k=effective_k, dim=-1)
 
-        # Map back to global indices
-        # best_candidate_indices tells us WHICH candidate won (0..world_size*k)
-        # We use gather to find the actual global index (0..pool_size)
-        final_indices = torch.gather(all_indices, -1, best_candidate_indices)
-
         # Calculate Softmax Weights
         final_weights = F.softmax(final_scores, dim=-1)
 

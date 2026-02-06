@@ -6,24 +6,22 @@ Usage:
     torchrun --nproc_per_node=2 train_distributed_tp.py
 """
 
+import argparse
 import os
 import sys
-import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
-from torch.utils.data.dataset import TensorDataset
-
-from src.model.config import DPSNRConfig
-from src.model.dpsn_r import DPSNR
-from src.data.synthetic import SyntheticDataset, collate_fn
-from src.utils.config_loader import load_config
-from src.data.hf_loader import get_hf_dataloader
+import time
 from dataclasses import asdict
 from functools import partial
-import time
-import argparse
+
+import torch
+import torch.distributed as dist
+from torch.utils.data import DataLoader, DistributedSampler
+
+from src.data.hf_loader import get_hf_dataloader
+from src.data.synthetic import SyntheticDataset, collate_fn
+from src.model.config import DPSNRConfig
+from src.model.dpsn_r import DPSNR
+from src.utils.config_loader import load_config
 
 
 def parse_args():
@@ -84,7 +82,7 @@ def train():
     pool_params = sum(p.numel() for p in model.pool.parameters())
     if global_rank == 0:
         print(f"\n{'=' * 40}")
-        print(f"Model Configuration")
+        print("Model Configuration")
         print(f"Total Parameters: {total_params / 1e6:.2f}M")
         print(f"Pool Parameters:  {pool_params / 1e6:.2f}M (Sharded across {world_size} GPUs)")
         print(f"Controller Params: {(total_params - pool_params) / 1e6:.2f}M")
