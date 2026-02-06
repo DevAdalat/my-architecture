@@ -9,8 +9,8 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
-from src.data.tokenizer import CharTokenizer
-from src.utils.config_loader import DatasetConfig, TrainingConfig
+from .tokenizer import CharTokenizer
+from ..utils.config_loader import DatasetConfig, TrainingConfig
 
 
 def hf_collate_fn(batch: list[dict], max_len: int) -> dict[str, torch.Tensor]:

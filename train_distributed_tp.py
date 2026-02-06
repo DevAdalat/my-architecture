@@ -11,7 +11,11 @@ import os
 import sys
 import time
 from dataclasses import asdict
-from functools import partial
+
+# Ensure project root is in sys.path for distributed processes
+project_root = os.path.dirname(os.path.abspath(__file__))
+if project_root not in sys.path:
+    sys.path.append(project_root)
 
 import torch
 import torch.distributed as dist
