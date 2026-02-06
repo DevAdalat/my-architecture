@@ -18,8 +18,20 @@ from torch.utils.data.dataset import TensorDataset
 from src.model.config import DPSNRConfig
 from src.model.dpsn_r import DPSNR
 from src.data.synthetic import SyntheticDataset, collate_fn
+from src.utils.config_loader import load_config
+from src.data.hf_loader import get_hf_dataloader
+from dataclasses import asdict
 from functools import partial
 import time
+import argparse
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="DPSN-R Distributed Training")
+    parser.add_argument(
+        "--config", type=str, default="configs/default.yaml", help="Path to YAML config file"
+    )
+    return parser.parse_args()
 
 
 def setup_distributed():
@@ -58,19 +70,11 @@ def train():
     print(f"[Rank {global_rank}] Initializing... Device: {device}")
 
     # 2. Configuration
-    config = DPSNRConfig(
-        vocab_size=1000,
-        hidden_dim=128,
-        num_heads=4,
-        head_dim=32,
-        pool_size=1024,
-        pool_dim=128,  # Must be multiple of 128
-        top_k=128,  # Small k for sparse fetch (Multiple of 128)
-        # Partition ratios (not sizes)
-        knowledge_ratio=0.5,
-        reasoning_ratio=0.3,
-        grammar_ratio=0.2,
-    )
+    args = parse_args()
+    full_config = load_config(args.config)
+
+    # Map ModelConfig to DPSNRConfig
+    config = DPSNRConfig(**asdict(full_config.model))
 
     # 3. Model Initialization
     model = DPSNR(config).to(device)
@@ -97,21 +101,42 @@ def train():
     print(f"[Rank {global_rank}] Using Manual Gradient Sync for Controller...")
 
     # 6. Optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=full_config.training.lr)
 
     # 7. Data Loader
-    train_dataset = SyntheticDataset(num_samples=5000, vocab_size=1000, max_seq_len=32, seed=42)
-    val_dataset = SyntheticDataset(num_samples=500, vocab_size=1000, max_seq_len=32, seed=43)
-
-    collate = partial(collate_fn, max_len=32)
-
-    train_sampler = DistributedSampler(train_dataset)
-    val_sampler = DistributedSampler(val_dataset, shuffle=False)
-
-    train_loader = DataLoader(
-        train_dataset, batch_size=16, sampler=train_sampler, collate_fn=collate
-    )
-    val_loader = DataLoader(val_dataset, batch_size=16, sampler=val_sampler, collate_fn=collate)
+    if full_config.dataset.name == "synthetic":
+        train_dataset = SyntheticDataset(
+            num_samples=5000,
+            vocab_size=config.vocab_size,
+            max_seq_len=full_config.training.seq_len,
+            seed=42,
+        )
+        val_dataset = SyntheticDataset(
+            num_samples=500,
+            vocab_size=config.vocab_size,
+            max_seq_len=full_config.training.seq_len,
+            seed=43,
+        )
+        train_sampler = DistributedSampler(train_dataset)
+        val_sampler = DistributedSampler(val_dataset, shuffle=False)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=full_config.training.batch_size,
+            sampler=train_sampler,
+            collate_fn=partial(collate_fn, max_len=full_config.training.seq_len),
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=full_config.training.batch_size,
+            sampler=val_sampler,
+            collate_fn=partial(collate_fn, max_len=full_config.training.seq_len),
+        )
+    else:
+        # HuggingFace Loader (Streaming supported)
+        train_loader = get_hf_dataloader(full_config.dataset, full_config.training)
+        # Use same loader logic for validation (approximate)
+        val_loader = get_hf_dataloader(full_config.dataset, full_config.training)
+        train_sampler = None
 
     # 8. Training Loop
     model.train()
@@ -119,11 +144,11 @@ def train():
     print(f"[Rank {global_rank}] Starting Training Loop...")
 
     # Metrics
-    seq_len = 32
-    batch_size = 16
-    recurrent_steps = 8
+    seq_len = full_config.training.seq_len
+    batch_size = full_config.training.batch_size
+    recurrent_steps = full_config.training.recurrent_steps
 
-    num_epochs = 5
+    num_epochs = full_config.training.epochs
 
     candidates_per_step = world_size * config.top_k
     bytes_scores = candidates_per_step * 4
@@ -137,7 +162,8 @@ def train():
     t0 = time.time()
 
     for epoch in range(num_epochs):
-        train_sampler.set_epoch(epoch)
+        if train_sampler:
+            train_sampler.set_epoch(epoch)
         model.train()
         total_loss = 0.0
 
