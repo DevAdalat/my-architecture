@@ -1,0 +1,47 @@
+# DPSN-R Full Configuration Example
+# This file documents every parameter supported by the architecture and training pipeline.
+
+model:
+  # Vocabulary and Sequence
+  vocab_size: 32000          # Total vocabulary size (set to match your HF tokenizer)
+  max_seq_len: 2048         # Maximum sequence length supported by the model
+
+  # Controller Architecture (Multiples of 128 recommended for TPU efficiency)
+  hidden_dim: 512           # Main hidden dimension of the controller
+  num_layers: 4             # Number of Transformer layers in the controller
+  num_heads: 8              # Number of attention heads
+  head_dim: 64              # Dimension per attention head
+  intermediate_dim: 2048    # FFN intermediate dimension
+  dropout: 0.1              # Dropout probability
+
+  # Parameter Pool (The "Externalized Brain")
+  pool_size: 100000         # Total number of parameter vectors in the pool
+  pool_dim: 256             # Dimension of each pool vector
+  top_k: 512                # Number of vectors retrieved per reasoning step
+  retrieval_dim: 128        # Dimension of the retrieval query projection
+
+  # Recurrent Reasoning & ACT
+  max_reasoning_steps: 8    # Maximum loops per token (Understanding -> Reasoning -> Expression)
+  act_threshold: 0.99       # Halting probability threshold for Adaptive Compute
+  ponder_lambda: 0.01       # Weight for the ponder loss (penalizes excessive thinking)
+
+  # Pool Partition Ratios (Must sum to 1.0)
+  knowledge_ratio: 0.7      # 70% of pool for factual knowledge
+  reasoning_ratio: 0.2      # 20% of pool for logical patterns
+  grammar_ratio: 0.1        # 10% of pool for linguistic structure
+
+training:
+  batch_size: 16            # Number of sequences per batch
+  lr: 0.0001                # Learning rate
+  epochs: 5                 # Total training epochs
+  seq_len: 128              # Sequence length used during training
+  recurrent_steps: 8        # Maximum recurrent steps (usually matches model.max_reasoning_steps)
+  weight_decay: 0.01        # L2 regularization factor
+
+dataset:
+  name: "roneneldan/TinyStories" # HuggingFace dataset path
+  config_name: null              # Subset/config name for the dataset
+  streaming: false               # Whether to stream the dataset (useful for large datasets)
+  column_name: "text"            # The field in the dataset containing the raw text
+  tokenizer_name: "gpt2"         # HuggingFace tokenizer identifier (e.g., 'gpt2', 'bert-base-uncased')
+  prefetch_factor: 2             # Number of batches to prefetch per worker
