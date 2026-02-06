@@ -58,7 +58,6 @@ def train():
     print(f"[Rank {global_rank}] Initializing... Device: {device}")
 
     # 2. Configuration
-    # NOTE: Mini configuration for testing with Synthetic Data
     config = DPSNRConfig(
         vocab_size=1000,
         hidden_dim=128,
@@ -101,11 +100,18 @@ def train():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     # 7. Data Loader
-    # Use Synthetic Data with Associative Recall
-    dataset = SyntheticDataset(num_samples=1000, vocab_size=1000, max_seq_len=32)
+    train_dataset = SyntheticDataset(num_samples=5000, vocab_size=1000, max_seq_len=32, seed=42)
+    val_dataset = SyntheticDataset(num_samples=500, vocab_size=1000, max_seq_len=32, seed=43)
+
     collate = partial(collate_fn, max_len=32)
-    sampler = DistributedSampler(dataset)
-    dataloader = DataLoader(dataset, batch_size=16, sampler=sampler, collate_fn=collate)
+
+    train_sampler = DistributedSampler(train_dataset)
+    val_sampler = DistributedSampler(val_dataset, shuffle=False)
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=16, sampler=train_sampler, collate_fn=collate
+    )
+    val_loader = DataLoader(val_dataset, batch_size=16, sampler=val_sampler, collate_fn=collate)
 
     # 8. Training Loop
     model.train()
@@ -113,14 +119,12 @@ def train():
     print(f"[Rank {global_rank}] Starting Training Loop...")
 
     # Metrics
-    seq_len = 32  # Matches max_seq_len
+    seq_len = 32
     batch_size = 16
-    recurrent_steps = 8  # Default for DPSN-R
+    recurrent_steps = 8
 
-    # Calculate Theoretical Bandwidth per Step (Forward Only)
-    # We gather (Scores + Indices + Vectors) for (WorldSize * K) candidates
-    # Done 'recurrent_steps' times per forward pass
-    # Scores: Float32 (4 bytes), Indices: Int64 (8 bytes), Vectors: Float32 (4 bytes * dim)
+    num_epochs = 5
+
     candidates_per_step = world_size * config.top_k
     bytes_scores = candidates_per_step * 4
     bytes_indices = candidates_per_step * 8
@@ -128,60 +132,51 @@ def train():
 
     payload_per_token_pass = bytes_scores + bytes_indices + bytes_vectors
     total_bytes_per_step_fwd = payload_per_token_pass * batch_size * seq_len * recurrent_steps
-    # Backward pass usually involves similar or double traffic for gradients
     total_bytes_per_step_est = total_bytes_per_step_fwd * 2
 
     t0 = time.time()
 
-    for epoch in range(1):
-        sampler.set_epoch(epoch)
-        for step, batch in enumerate(dataloader):
-            # Unpack dict batch from collate_fn
+    for epoch in range(num_epochs):
+        train_sampler.set_epoch(epoch)
+        model.train()
+        total_loss = 0.0
+
+        for step, batch in enumerate(train_loader):
             inputs = batch["input_ids"].to(device)
             targets = batch["labels"].to(device)
 
             optimizer.zero_grad()
 
-            # Forward Pass
-            # The model internally calls model.pool.retrieve(...)
-            # which now triggers the distributed "Sparse Fetch" logic.
             outputs = model(inputs)
 
-            # Loss Calculation (Standard dummy loss)
-            # Assuming output is [B, S, V]
             logits = outputs["logits"]
             loss = torch.nn.functional.cross_entropy(
                 logits.view(-1, config.vocab_size), targets.view(-1)
             )
 
-            # Backward Pass
             loss.backward()
 
-            # Manual Gradient Sync for Controller (Data Parallel)
-            # Since we didn't use DDP, we must average gradients for the replicated parts.
             for param in model.controller.parameters():
                 if param.grad is not None:
                     dist.all_reduce(param.grad.data, op=dist.ReduceOp.SUM)
                     param.grad.data /= world_size
 
-            # Optimizer Step
             optimizer.step()
+
+            total_loss += loss.item()
 
             if step % 10 == 0 and global_rank == 0:
                 t1 = time.time()
                 dt = t1 - t0
                 t0 = t1
 
-                # Calculate Metrics
                 if step == 0:
-                    dt = 1.0  # Avoid div/0 on first step
+                    dt = 1.0
 
-                # 10 steps elapsed (except first)
                 steps_elapsed = 10 if step > 0 else 1
 
                 tps = (batch_size * seq_len * steps_elapsed) / dt
 
-                # Bandwidth (MB/s)
                 mb_moved = (total_bytes_per_step_est * steps_elapsed) / 1e6
                 mbps = mb_moved / dt
 
@@ -190,6 +185,62 @@ def train():
                     f"TPS: {tps:7.1f} tok/s | "
                     f"Comm: {mbps:6.1f} MB/s (Est)"
                 )
+
+        if global_rank == 0:
+            print(f"Ep {epoch} | Training Avg Loss: {total_loss / len(train_loader):.4f}")
+
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for batch in val_loader:
+                inputs = batch["input_ids"].to(device)
+                targets = batch["labels"].to(device)
+                outputs = model(inputs)
+                logits = outputs["logits"]
+                loss = torch.nn.functional.cross_entropy(
+                    logits.view(-1, config.vocab_size), targets.view(-1)
+                )
+                val_loss += loss.item()
+
+        avg_val_loss = val_loss / len(val_loader)
+        val_loss_tensor = torch.tensor(avg_val_loss).to(device)
+        dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
+        avg_val_loss = val_loss_tensor.item() / world_size
+
+        if global_rank == 0:
+            print(f"Ep {epoch} | Validation Loss: {avg_val_loss:.4f}")
+
+    if global_rank == 0:
+        print("\n" + "=" * 40)
+        print("Running Generation Demo...")
+        print("=" * 40)
+
+    model.eval()
+
+    if global_rank == 0:
+        start_tokens = torch.tensor([[1, 10, 20, 30, 10]], dtype=torch.long).to(device)
+    else:
+        start_tokens = torch.tensor([[1, 10, 20, 30, 10]], dtype=torch.long).to(device)
+
+    dist.broadcast(start_tokens, src=0)
+
+    generated = start_tokens
+    max_new_tokens = 10
+
+    with torch.no_grad():
+        for _ in range(max_new_tokens):
+            outputs = model(generated)
+            next_token_logits = outputs["logits"][:, -1, :]
+            next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+
+            dist.broadcast(next_token, src=0)
+
+            generated = torch.cat([generated, next_token], dim=1)
+
+    if global_rank == 0:
+        print(f"Input: {start_tokens.tolist()}")
+        print(f"Generated: {generated.tolist()}")
+        print("=" * 40)
 
     print(f"[Rank {global_rank}] Training Complete.")
     cleanup_distributed()
