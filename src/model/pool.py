@@ -11,9 +11,11 @@ XLA Compliance:
 from typing import Literal
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
+import torch.distributed as dist
 import torch.nn.functional as F
-
+import torch.distributed as dist
 from .config import DPSNRConfig
 
 PhaseType = Literal["knowledge", "reasoning", "grammar", "all"]
@@ -119,7 +121,6 @@ class MassivePool(nn.Module):
         effective_k: int,
     ) -> torch.Tensor:
         """Distributed retrieval: Local Scan -> All-Gather Candidates -> Global Select -> Sparse Fetch."""
-        import torch.distributed as dist
 
         batch_size, seq_len, _ = query.shape
 

@@ -201,6 +201,9 @@ class DPSNR(nn.Module):
             next_token = torch.multinomial(probs, num_samples=1)
             input_ids = torch.cat([input_ids, next_token], dim=1)
 
+            # Explicitly delete outputs to free graph/memory immediately
+            del outputs
+
         return input_ids
 
     def count_parameters(self) -> dict[str, int]:

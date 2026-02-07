@@ -244,6 +244,9 @@ def train():
                 )
 
             if step > 0 and step % full_config.training.generate_steps == 0:
+                # Explicit cache clearing before generation to prevent OOM
+                torch.cuda.empty_cache()
+
                 if global_rank == 0:
                     print(f"\n[Step {step}] Generating sample...")
 
@@ -285,6 +288,19 @@ def train():
                         else:
                             print("(No tokenizer available for decoding - raw IDs shown)")
                         print(f"{'-' * 40}")
+
+                # Cleanup generation artifacts and clear cache
+                del prompt_ids, curr_ids
+                if "out" in locals():
+                    del out
+                if "logits" in locals():
+                    del logits
+                if "probs" in locals():
+                    del probs
+                if "next_token" in locals():
+                    del next_token
+
+                torch.cuda.empty_cache()
 
                 model.train()
 
