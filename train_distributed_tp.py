@@ -303,6 +303,7 @@ def train():
                 ):
                     if global_rank == 0:
                         print(f"\n[Step {step}] Saving checkpoint...")
+                        os.makedirs("checkpoints", exist_ok=True)
                         checkpoint_path = f"checkpoints/step_{step}.pt"
                         torch.save(
                             {
