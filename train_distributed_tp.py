@@ -238,14 +238,18 @@ def train():
 
                 model.eval()
                 with torch.no_grad():
-                    prompt_ids = torch.tensor([[1, 10, 20, 30, 10]], dtype=torch.long).to(device)
+                    prompt_text = "Once upon a time"
+                    prompt_ids = tokenizer.encode(prompt_text, return_tensors="pt").to(device)
 
                     gen_len = 20
                     curr_ids = prompt_ids
 
                     for _ in range(gen_len):
                         out = model(curr_ids)
-                        next_token = torch.argmax(out["logits"][:, -1, :], dim=-1, keepdim=True)
+                        temperature = 0.8
+                        logits = out["logits"][:, -1, :] / temperature
+                        probs = torch.softmax(logits, dim=-1)
+                        next_token = torch.multinomial(probs, num_samples=1)
                         curr_ids = torch.cat([curr_ids, next_token], dim=1)
 
                     if global_rank == 0:
@@ -330,10 +334,11 @@ def train():
 
     model.eval()
 
+    prompt_text = "Once upon a time"
     if global_rank == 0:
-        start_tokens = torch.tensor([[1, 10, 20, 30, 10]], dtype=torch.long).to(device)
+        start_tokens = tokenizer.encode(prompt_text, return_tensors="pt").to(device)
     else:
-        start_tokens = torch.tensor([[1, 10, 20, 30, 10]], dtype=torch.long).to(device)
+        start_tokens = torch.zeros((1, 4), dtype=torch.long).to(device)
 
     dist.broadcast(start_tokens, src=0)
 
@@ -344,15 +349,18 @@ def train():
         for _ in range(max_new_tokens):
             outputs = model(generated)
             next_token_logits = outputs["logits"][:, -1, :]
-            next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+            temperature = 0.8
+            logits = next_token_logits / temperature
+            probs = torch.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
 
             dist.broadcast(next_token, src=0)
 
             generated = torch.cat([generated, next_token], dim=1)
 
     if global_rank == 0:
-        print(f"Input: {start_tokens.tolist()}")
-        print(f"Generated: {generated.tolist()}")
+        print(f"Input: {tokenizer.decode(start_tokens[0].tolist())}")
+        print(f"Generated: {tokenizer.decode(generated[0].tolist())}")
         print("=" * 40)
 
     print(f"[Rank {global_rank}] Training Complete.")
