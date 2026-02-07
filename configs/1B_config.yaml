@@ -15,7 +15,7 @@ model:
   # Parameter Pool (~615M params)
   pool_size: 600000         # 600k vectors
   pool_dim: 768             # 6 * 128 (Half of hidden_dim)
-  top_k: 1024               # 8 * 128
+  top_k: 32
   retrieval_dim: 256        # 2 * 128
 
   # Recurrent Reasoning & ACT
