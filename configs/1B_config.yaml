@@ -1,6 +1,6 @@
 model:
   # Vocabulary and Sequence
-  vocab_size: 32000
+  vocab_size: 50304         # Rounded to 128 multiple for TPU (tokenizer is 50257)
   max_seq_len: 2048
 
   # Controller Architecture (1.0B total params with pool)
