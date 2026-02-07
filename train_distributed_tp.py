@@ -228,13 +228,8 @@ def train():
                     f"Comm: {mbps:6.1f} MB/s (Est)"
                 )
 
-            if (
-                full_config.training.generate_steps > 0
-                and step > 0
-                and step % full_config.training.generate_steps == 0
-            ):
-                if global_rank == 0:
-                    print(f"\n[Step {step}] Generating sample...")
+            if step > 0 and step % full_config.training.generate_steps == 0 and global_rank == 0:
+                print(f"\n[Step {step}] Generating sample...")
 
                 model.eval()
                 with torch.no_grad():
@@ -252,14 +247,13 @@ def train():
                         next_token = torch.multinomial(probs, num_samples=1)
                         curr_ids = torch.cat([curr_ids, next_token], dim=1)
 
-                    if global_rank == 0:
-                        print(f"Generated Tokens: {curr_ids[0].tolist()}")
-                        if tokenizer:
-                            decoded_text = tokenizer.decode(
-                                curr_ids[0].tolist(), skip_special_tokens=True
-                            )
-                            print(f"Generated Text: {decoded_text}")
-                        print(f"{'-' * 40}")
+                    print(f"Generated Tokens: {curr_ids[0].tolist()}")
+                    if tokenizer:
+                        decoded_text = tokenizer.decode(
+                            curr_ids[0].tolist(), skip_special_tokens=True
+                        )
+                        print(f"Generated Text: {decoded_text}")
+                    print(f"{'-' * 40}")
 
                 model.train()
 
