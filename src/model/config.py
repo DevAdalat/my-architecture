@@ -74,8 +74,8 @@ class DPSNRConfig:
             raise ValueError(f"hidden_dim must be multiple of 128, got {self.hidden_dim}")
         if self.pool_dim % 128 != 0:
             raise ValueError(f"pool_dim must be multiple of 128, got {self.pool_dim}")
-        if self.top_k % 128 != 0:
-            raise ValueError(f"top_k must be multiple of 128, got {self.top_k}")
+        if self.top_k % 32 != 0:
+            raise ValueError(f"top_k must be multiple of 32, got {self.top_k}")
 
         # Validate ratios sum to 1
         total_ratio = self.knowledge_ratio + self.reasoning_ratio + self.grammar_ratio
