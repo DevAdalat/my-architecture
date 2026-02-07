@@ -21,6 +21,7 @@ if project_root not in sys.path:
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
+from transformers import AutoTokenizer
 
 from src.data.hf_loader import get_hf_dataloader
 from src.data.synthetic import SyntheticDataset, collate_fn
@@ -147,6 +148,14 @@ def train():
     # 8. Training Loop
     model.train()
 
+    # Load tokenizer for decoding
+    tokenizer = None
+    if global_rank == 0:
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(full_config.dataset.tokenizer_name)
+        except Exception as e:
+            print(f"Warning: Could not load tokenizer for decoding: {e}")
+
     print(f"[Rank {global_rank}] Starting Training Loop...")
 
     # Metrics
@@ -241,6 +250,9 @@ def train():
 
                     if global_rank == 0:
                         print(f"Generated Tokens: {curr_ids[0].tolist()}")
+                        if tokenizer:
+                            decoded_text = tokenizer.decode(curr_ids[0], skip_special_tokens=True)
+                            print(f"Generated Text: {decoded_text}")
                         print(f"{'-' * 40}")
 
                 model.train()
