@@ -35,8 +35,8 @@ training:
   seq_len: 512
   recurrent_steps: 16
   weight_decay: 0.01
-  generate_every_steps: 50
-  checkpoint_every_steps: 200
+  generate_steps: 50
+  save_steps: 200
 
 dataset:
   name: "roneneldan/TinyStories"
