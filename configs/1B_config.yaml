@@ -39,7 +39,7 @@ training:
 dataset:
   name: "roneneldan/TinyStories"
   config_name: null
-  streaming: false
+  streaming: true
   column_name: "text"
-  tokenizer_name: "gpt2"
+  tokenizer_name: "EleutherAI/gpt-neo-125m"
   prefetch_factor: 2
