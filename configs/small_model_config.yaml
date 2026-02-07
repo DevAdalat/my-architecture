@@ -1,0 +1,35 @@
+model:
+  vocab_size: 50257  # GPT-2/Neo size
+  max_seq_len: 128
+  hidden_dim: 128
+  num_layers: 2
+  num_heads: 4
+  head_dim: 32
+  intermediate_dim: 512
+  dropout: 0.1
+  pool_size: 1000
+  pool_dim: 128
+  top_k: 128
+  retrieval_dim: 32
+  max_reasoning_steps: 2
+  act_threshold: 0.95
+  ponder_lambda: 0.01
+  knowledge_ratio: 0.7
+  reasoning_ratio: 0.2
+  grammar_ratio: 0.1
+
+training:
+  batch_size: 2
+  lr: 0.0001
+  epochs: 1
+  seq_len: 64
+  recurrent_steps: 2
+  weight_decay: 0.01
+
+dataset:
+  name: "roneneldan/TinyStories"
+  config_name: null
+  streaming: true
+  column_name: "text"
+  tokenizer_name: "EleutherAI/gpt-neo-125m"
+  prefetch_factor: 2
