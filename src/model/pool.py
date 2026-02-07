@@ -232,36 +232,11 @@ class MassivePool(nn.Module):
         final_weights = F.softmax(final_scores, dim=-1)
 
         # --- Step 4: Sparse Fetch (The "Vector Routing") ---
-        # We know WHICH vector we want (final_indices).
-        # We know WHERE it is (index // shard_size -> rank).
-        # But efficiently fetching distinct vectors from different GPUs is complex in raw PyTorch
-        # without RPC.
-        # Standard "Sparse All-to-All" trick:
-        # 1. We essentially need a "Global Index Select".
-        # 2. Since we can't do random access on remote GPU memory,
-        #    the standard efficient pattern is actually:
-        #    - Each GPU sends its local candidate vectors if they were selected? No, we don't know yet.
-        #
-        # OPTIMIZED APPROACH:
-        # Since 'k' is small (512) and vectors are small (256),
-        # it is often faster to GATHER THE CANDIDATE VECTORS in Step 2 along with scores.
-        # But user specifically asked to "send only specific vectors".
-        #
-        # Re-evaluating:
-        # If we gather vectors in Step 2, we transfer (world_size * k * dim) data.
-        # If world_size=2, k=512, dim=256 -> 2 * 512 * 256 * 2bytes = 512KB.
-        # This is TINY.
-        #
-        # So the logic:
+        # Logic:
         # 1. Local Search -> Get top K candidates (Score, Index, AND Vector).
         # 2. All-Gather (Score, Index, Vector).
         # 3. Global Top-K on Score.
         # 4. Select corresponding Vector.
-        #
-        # This fulfills the user's requirement of "Local computation" and effective routing
-        # because we only computed/touched vectors locally, then shipped the candidates.
-
-        # Let's implement this "Gather Candidates" approach. It's robust and fast.
 
         # Re-do Local Step to include Vectors
         if overlap_start < overlap_end:
@@ -291,9 +266,19 @@ class MassivePool(nn.Module):
 
         final_vectors = torch.gather(all_vectors, 2, vector_gather_indices)
 
-        # Weighted sum
-        final_weights = final_weights.unsqueeze(-1)
-        aggregated = (final_vectors * final_weights).sum(dim=2)
+        # Weighted sum optimization to avoid massive intermediate tensor [B, S, k, dim]
+        # Previous: aggregated = (final_vectors * final_weights.unsqueeze(-1)).sum(dim=2)
+        #
+        # Memory Efficient Approach using Batch Matrix Multiply (BMM):
+        # final_weights: [B, S, k] -> [B*S, 1, k]
+        # final_vectors: [B, S, k, D] -> [B*S, k, D]
+        # bmm([B*S, 1, k], [B*S, k, D]) -> [B*S, 1, D] -> [B, S, D]
+
+        weights_flat = final_weights.reshape(-1, 1, effective_k)
+        vectors_flat = final_vectors.reshape(-1, effective_k, self.pool_dim)
+
+        aggregated_flat = torch.bmm(weights_flat, vectors_flat)
+        aggregated = aggregated_flat.reshape(batch_size, seq_len, self.pool_dim)
 
         return aggregated
 
