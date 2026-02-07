@@ -304,6 +304,11 @@ class MassivePool(nn.Module):
 
             return self._retrieve_partition_distributed(query, start, end, effective_k)
 
+        # Assert for static analysis
+        # Assert for static analysis
+        assert keys is not None
+        assert pool is not None
+
         batch_size, seq_len, _ = query.shape
 
         # Compute scores: [batch, seq, partition_size]
