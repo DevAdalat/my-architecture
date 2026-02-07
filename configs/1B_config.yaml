@@ -29,7 +29,7 @@ model:
   grammar_ratio: 0.1
 
 training:
-  batch_size: 8             # Reduced for larger model memory footprint
+  batch_size: 4             # Reduced for larger model memory footprint
   lr: 0.00005               # Lower learning rate for stability
   epochs: 3
   seq_len: 512
