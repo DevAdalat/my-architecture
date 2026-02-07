@@ -19,7 +19,7 @@ model:
   retrieval_dim: 256        # 2 * 128
 
   # Recurrent Reasoning & ACT
-  max_reasoning_steps: 16   # Increased depth for larger model
+  max_reasoning_steps: 8    # Increased depth for larger model
   act_threshold: 0.99
   ponder_lambda: 0.01
 
@@ -33,7 +33,7 @@ training:
   lr: 0.00005               # Lower learning rate for stability
   epochs: 3
   seq_len: 512
-  recurrent_steps: 16
+  recurrent_steps: 8
   weight_decay: 0.01
   generate_steps: 50
   save_steps: 200
