@@ -39,6 +39,8 @@ class TrainingConfig:
     seq_len: int
     recurrent_steps: int
     weight_decay: float = 0.01
+    generate_every_steps: int = 100
+    checkpoint_every_steps: int = 1000
 
 
 @dataclass
