@@ -205,7 +205,21 @@ def train():
 
             optimizer.step()
 
-            total_loss += loss.item()
+            # --- Explicit Memory Management to prevent OOM ---
+            # 1. Detach loss to free graph
+            loss_val = loss.item()
+            total_loss += loss_val
+
+            # 2. Delete graph-holding tensors
+            del outputs, loss, logits
+
+            # 3. Aggressive GC every 5 steps
+            if step % 5 == 0:
+                torch.cuda.empty_cache()
+                import gc
+
+                gc.collect()
+            # -------------------------------------------------
 
             if step % 10 == 0 and global_rank == 0:
                 t1 = time.time()
@@ -224,7 +238,7 @@ def train():
                 mbps = mb_moved / dt
 
                 print(
-                    f"Ep {epoch} | Step {step:3d} | Loss: {loss.item():.4f} | "
+                    f"Ep {epoch} | Step {step:3d} | Loss: {loss_val:.4f} | "
                     f"TPS: {tps:7.1f} tok/s | "
                     f"Comm: {mbps:6.1f} MB/s (Est)"
                 )
@@ -288,7 +302,7 @@ def train():
                             "step": step,
                             "model_state_dict": model.state_dict(),
                             "optimizer_state_dict": optimizer.state_dict(),
-                            "loss": loss.item(),
+                            "loss": loss_val,
                         },
                         checkpoint_path,
                     )

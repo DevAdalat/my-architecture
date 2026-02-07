@@ -155,7 +155,9 @@ class MassivePool(nn.Module):
                 key_chunk = local_keys_part[i:end_idx]
 
                 # [B, S, chunk_size]
-                chunk_scores = torch.matmul(query, key_chunk.T)
+                # DETACH to prevent massive graph buildup.
+                # Since dist.all_gather breaks gradients anyway, keeping this graph is useless memory cost.
+                chunk_scores = torch.matmul(query, key_chunk.T).detach()
 
                 # Local Top-K for this chunk
                 curr_k_chunk = min(effective_k, chunk_scores.size(-1))
