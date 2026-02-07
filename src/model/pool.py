@@ -180,6 +180,8 @@ class MassivePool(nn.Module):
             # global index = my_top_indices_local + overlap_start
             my_top_indices_global = my_top_indices_local + overlap_start
 
+            curr_k = my_top_indices_local.size(-1)
+
         else:
             # We have NO data for this partition (e.g., I'm GPU 0, partition is strictly on GPU 1)
             # Return dummy results (score -inf)
