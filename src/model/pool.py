@@ -131,14 +131,49 @@ class MassivePool(nn.Module):
             # self.local_keys is [shard_size, dim]
             local_keys_part = self.local_keys[local_slice_start:local_slice_end]  # type: ignore
 
-            # Compute scores locally
-            # [B, S, local_part_size]
-            local_scores = torch.matmul(query, local_keys_part.T)
+            # Chunked Score Computation to avoid OOM
+            # [B, S, local_part_size] is too big (e.g. 5GB).
+            # We compute scores in blocks of keys.
+            chunk_size = 20000  # Process 20k keys at a time (~320MB for scores)
+            num_keys = local_keys_part.size(0)
 
-            # Local Top-K (get more than needed to be safe for global merge)
-            # If local partition is smaller than k, take all
-            curr_k = min(effective_k, local_scores.size(-1))
-            my_top_scores, my_top_indices_local = torch.topk(local_scores, k=curr_k, dim=-1)
+            best_scores = None
+            best_indices = None
+
+            for i in range(0, num_keys, chunk_size):
+                end_idx = min(i + chunk_size, num_keys)
+                key_chunk = local_keys_part[i:end_idx]
+
+                # [B, S, chunk_size]
+                chunk_scores = torch.matmul(query, key_chunk.T)
+
+                # Local Top-K for this chunk
+                curr_k_chunk = min(effective_k, chunk_scores.size(-1))
+                chunk_top_scores, chunk_top_indices_local = torch.topk(
+                    chunk_scores, k=curr_k_chunk, dim=-1
+                )
+
+                # Adjust indices to be relative to the full local part start
+                chunk_top_indices_local = chunk_top_indices_local + i
+
+                if best_scores is None:
+                    best_scores = chunk_top_scores
+                    best_indices = chunk_top_indices_local
+                else:
+                    # Merge with previous best
+                    combined_scores = torch.cat([best_scores, chunk_top_scores], dim=-1)
+                    combined_indices = torch.cat([best_indices, chunk_top_indices_local], dim=-1)
+
+                    # Take top-k of combined
+                    # Note: combined size is at most 2*effective_k
+                    curr_k_combined = min(effective_k, combined_scores.size(-1))
+                    best_scores, best_indices_idx = torch.topk(
+                        combined_scores, k=curr_k_combined, dim=-1
+                    )
+                    best_indices = torch.gather(combined_indices, -1, best_indices_idx)
+
+            my_top_scores = best_scores
+            my_top_indices_local = best_indices
 
             # Convert local indices to global indices
             # my_top_indices_local is 0..local_part_size
