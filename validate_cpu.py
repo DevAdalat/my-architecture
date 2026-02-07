@@ -6,13 +6,6 @@ Runs on CPU/CUDA (Standard PyTorch).
 
 import time
 from functools import partial
-import sys
-import os
-
-# Ensure project root is in sys.path
-project_root = os.path.dirname(os.path.abspath(__file__))
-if project_root not in sys.path:
-    sys.path.append(project_root)
 
 import torch
 import torch.nn as nn

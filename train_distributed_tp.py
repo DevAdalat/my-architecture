@@ -12,11 +12,7 @@ import sys
 import time
 from dataclasses import asdict
 from functools import partial
-
-# Ensure project root is in sys.path for distributed processes
-project_root = os.path.dirname(os.path.abspath(__file__))
-if project_root not in sys.path:
-    sys.path.append(project_root)
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -101,6 +97,10 @@ def train():
     print(f"[Rank {global_rank}] Sharding Massive Pool...")
     model.pool.enable_distributed(global_rank, world_size)
 
+    # Verify Sharding (Print local params)
+    local_pool_params = sum(p.numel() for p in model.pool.parameters())
+    print(f"[Rank {global_rank}] Local Pool Params after sharding: {local_pool_params / 1e6:.4f}M")
+
     # 5. Wrap Controller in DDP (Data Parallel)
     # FIX: We cannot wrap model.controller in DDP because dpsn_r.py calls custom methods
     # like 'encode', 'predict_halt' which DDP hides.
@@ -149,7 +149,7 @@ def train():
     model.train()
 
     # Load tokenizer for decoding
-    tokenizer = None
+    tokenizer: Any = None
     if global_rank == 0:
         try:
             tokenizer = AutoTokenizer.from_pretrained(full_config.dataset.tokenizer_name)
@@ -181,6 +181,7 @@ def train():
             train_sampler.set_epoch(epoch)
         model.train()
         total_loss = 0.0
+        step = 0
 
         for step, batch in enumerate(train_loader):
             inputs = batch["input_ids"].to(device)
@@ -235,33 +236,54 @@ def train():
                 model.eval()
                 with torch.no_grad():
                     prompt_text = "Once upon a time"
-                    if global_rank == 0:
-                        prompt_ids = tokenizer.encode(prompt_text, return_tensors="pt").to(device)
+                    # Handle missing tokenizer
+                    if tokenizer:
+                        if global_rank == 0:
+                            prompt_ids = tokenizer.encode(prompt_text, return_tensors="pt").to(
+                                device
+                            )
+                        else:
+                            prompt_ids = torch.zeros((1, 4), dtype=torch.long).to(device)
+
+                        proceed = torch.tensor(1, device=device)
                     else:
+                        proceed = torch.tensor(0, device=device)
                         prompt_ids = torch.zeros((1, 4), dtype=torch.long).to(device)
 
-                    dist.broadcast(prompt_ids, src=0)
+                    dist.broadcast(proceed, src=0)
 
-                    gen_len = 20
-                    curr_ids = prompt_ids
-
-                    for _ in range(gen_len):
-                        out = model(curr_ids)
-                        temperature = 0.8
-                        logits = out["logits"][:, -1, :] / temperature
-                        probs = torch.softmax(logits, dim=-1)
-                        next_token = torch.multinomial(probs, num_samples=1)
-                        curr_ids = torch.cat([curr_ids, next_token], dim=1)
-
-                    if global_rank == 0:
-                        print(f'Prompt: "{prompt_text}"')
-                        print(f"Generated Tokens: {curr_ids[0].tolist()}")
-                        if tokenizer:
-                            decoded_text = tokenizer.decode(
-                                curr_ids[0].tolist(), skip_special_tokens=True
+                    if proceed.item() == 1:
+                        if global_rank == 0 and tokenizer:
+                            prompt_ids = tokenizer.encode(prompt_text, return_tensors="pt").to(
+                                device
                             )
-                            print(f"Generated Text: {decoded_text}")
-                        print(f"{'-' * 40}")
+                        elif global_rank != 0:
+                            prompt_ids = torch.zeros((1, 4), dtype=torch.long).to(device)
+
+                        dist.broadcast(prompt_ids, src=0)
+
+                        gen_len = 20
+                        curr_ids = prompt_ids
+
+                        for _ in range(gen_len):
+                            out = model(curr_ids)
+                            temperature = 0.8
+                            logits = out["logits"][:, -1, :] / temperature
+                            probs = torch.softmax(logits, dim=-1)
+                            next_token = torch.multinomial(probs, num_samples=1)
+                            curr_ids = torch.cat([curr_ids, next_token], dim=1)
+
+                        if global_rank == 0:
+                            print(f'Prompt: "{prompt_text}"')
+                            print(f"Generated Tokens: {curr_ids[0].tolist()}")
+                            if tokenizer:
+                                decoded_text = tokenizer.decode(
+                                    curr_ids[0].tolist(), skip_special_tokens=True
+                                )
+                                print(f"Generated Text: {decoded_text}")
+                            print(f"{'-' * 40}")
+                    elif global_rank == 0:
+                        print("Skipping generation (no tokenizer)")
 
                 model.train()
 
@@ -336,34 +358,37 @@ def train():
 
     model.eval()
 
-    prompt_text = "Once upon a time"
-    if global_rank == 0:
-        start_tokens = tokenizer.encode(prompt_text, return_tensors="pt").to(device)
-    else:
-        start_tokens = torch.zeros((1, 4), dtype=torch.long).to(device)
+    if tokenizer:
+        prompt_text = "Once upon a time"
+        if global_rank == 0:
+            start_tokens = tokenizer.encode(prompt_text, return_tensors="pt").to(device)
+        else:
+            start_tokens = torch.zeros((1, 4), dtype=torch.long).to(device)
 
-    dist.broadcast(start_tokens, src=0)
+        dist.broadcast(start_tokens, src=0)
 
-    generated = start_tokens
-    max_new_tokens = 10
+        generated = start_tokens
+        max_new_tokens = 10
 
-    with torch.no_grad():
-        for _ in range(max_new_tokens):
-            outputs = model(generated)
-            next_token_logits = outputs["logits"][:, -1, :]
-            temperature = 0.8
-            logits = next_token_logits / temperature
-            probs = torch.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                outputs = model(generated)
+                next_token_logits = outputs["logits"][:, -1, :]
+                temperature = 0.8
+                logits = next_token_logits / temperature
+                probs = torch.softmax(logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
 
-            dist.broadcast(next_token, src=0)
+                dist.broadcast(next_token, src=0)
 
-            generated = torch.cat([generated, next_token], dim=1)
+                generated = torch.cat([generated, next_token], dim=1)
 
-    if global_rank == 0:
-        print(f"Input: {tokenizer.decode(start_tokens[0].tolist())}")
-        print(f"Generated: {tokenizer.decode(generated[0].tolist())}")
-        print("=" * 40)
+        if global_rank == 0:
+            print(f"Input: {tokenizer.decode(start_tokens[0].tolist())}")
+            print(f"Generated: {tokenizer.decode(generated[0].tolist())}")
+            print("=" * 40)
+    elif global_rank == 0:
+        print("Skipping Demo (no tokenizer)")
 
     print(f"[Rank {global_rank}] Training Complete.")
     print(f"[Rank {global_rank}] Cleaning up distributed process group...")

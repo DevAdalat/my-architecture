@@ -93,13 +93,23 @@ class MassivePool(nn.Module):
         self.local_start = start
         self.local_end = start + shard_size
 
-        # 2. Slice the Parameters (Views)
-        # Note: In real training, we'd initialize ONLY the shard.
-        # Here we slice the existing full parameter for compatibility.
-        # This keeps the nn.Parameter logic intact for optimizers initially,
-        # but forward pass will use the slices.
-        self.local_keys = self.keys[self.local_start : self.local_end]
-        self.local_pool = self.pool[self.local_start : self.local_end]
+        # 2. Slice the Parameters (Views) -> REAL SHARDING
+        # Create new leaf parameters for the shard to free memory
+        # We use .data to avoid tracking history, then wrap in Parameter
+        local_keys_data = self.keys.data[self.local_start : self.local_end].clone()
+        local_pool_data = self.pool.data[self.local_start : self.local_end].clone()
+
+        # Delete the full massive parameters to free memory
+        del self.keys
+        del self.pool
+
+        # Re-register the shards as the primary parameters
+        self.keys = nn.Parameter(local_keys_data)
+        self.pool = nn.Parameter(local_pool_data)
+
+        # Update local pointers to match
+        self.local_keys = self.keys
+        self.local_pool = self.pool
 
     def _retrieve_partition_distributed(
         self,
@@ -210,9 +220,9 @@ class MassivePool(nn.Module):
 
         # Concatenate: [B, S, world_size * k]
         all_scores = torch.cat(gathered_scores, dim=-1)
-        all_indices = torch.cat(gathered_indices, dim=-1)
 
         # --- Step 3: Global Selection ---
+
         # Find the global top-k from the candidates
         final_scores, best_candidate_indices = torch.topk(all_scores, k=effective_k, dim=-1)
 
@@ -288,38 +298,22 @@ class MassivePool(nn.Module):
     def _retrieve_partition(
         self,
         query: torch.Tensor,
-        keys: torch.Tensor,
-        pool: torch.Tensor,
+        keys: torch.Tensor | None,
+        pool: torch.Tensor | None,
         effective_k: int,
+        partition_range: tuple[int, int] | None = None,
     ) -> torch.Tensor:
         """Retrieve from a partition with static k value."""
 
         # Dispatch to distributed logic if enabled
         if self.is_distributed:
-            # We need to map the 'keys' argument back to partition ranges
-            # This is slightly hacky but necessary given the current signature
-            # or we assume standard partitions.
-            # Let's infer partition from keys length (not ideal) or use class attributes.
-            # Better: The caller (retrieve_knowledge) knows the range.
-            # We should modify the caller to pass ranges, or infer here.
-
-            # Infer partition from keys tensor identity or size?
-            # Easier: Check which partition range matches the size of 'keys' passed in.
-            # self.keys[self.knowledge_start : self.knowledge_end] size is knowledge_size
-
-            knowledge_size = self.knowledge_end - self.knowledge_start
-            reasoning_size = self.reasoning_end - self.reasoning_start
-            grammar_size = self.grammar_end - self.grammar_start
-
-            size = keys.size(0)
-            if size == knowledge_size:
-                start, end = self.knowledge_start, self.knowledge_end
-            elif size == reasoning_size:
-                start, end = self.reasoning_start, self.reasoning_end
-            elif size == grammar_size:
-                start, end = self.grammar_start, self.grammar_end
+            # Use explicit range if provided, otherwise fallback to inference (though callers should provide range)
+            if partition_range:
+                start, end = partition_range
             else:
-                start, end = 0, self.pool_size  # All
+                # Fallback logic (should ideally be removed if all callers are updated)
+                # But since we changed signature to allow None for keys/pool, let's just default to All
+                start, end = 0, self.pool_size
 
             return self._retrieve_partition_distributed(query, start, end, effective_k)
 
@@ -350,28 +344,58 @@ class MassivePool(nn.Module):
 
     def retrieve_knowledge(self, query: torch.Tensor) -> torch.Tensor:
         """Retrieve from knowledge partition (static shape)."""
-        keys = self.keys[self.knowledge_start : self.knowledge_end]
-        pool = self.pool[self.knowledge_start : self.knowledge_end]
-        result = self._retrieve_partition(query, keys, pool, self.knowledge_k)
+        start, end = self.knowledge_start, self.knowledge_end
+        if self.is_distributed:
+            keys, pool = None, None
+        else:
+            keys = self.keys[start:end]
+            pool = self.pool[start:end]
+
+        result = self._retrieve_partition(
+            query, keys, pool, self.knowledge_k, partition_range=(start, end)
+        )
         return self.output_proj(result)
 
     def retrieve_reasoning(self, query: torch.Tensor) -> torch.Tensor:
         """Retrieve from reasoning partition (static shape)."""
-        keys = self.keys[self.reasoning_start : self.reasoning_end]
-        pool = self.pool[self.reasoning_start : self.reasoning_end]
-        result = self._retrieve_partition(query, keys, pool, self.reasoning_k)
+        start, end = self.reasoning_start, self.reasoning_end
+        if self.is_distributed:
+            keys, pool = None, None
+        else:
+            keys = self.keys[start:end]
+            pool = self.pool[start:end]
+
+        result = self._retrieve_partition(
+            query, keys, pool, self.reasoning_k, partition_range=(start, end)
+        )
         return self.output_proj(result)
 
     def retrieve_grammar(self, query: torch.Tensor) -> torch.Tensor:
         """Retrieve from grammar partition (static shape)."""
-        keys = self.keys[self.grammar_start : self.grammar_end]
-        pool = self.pool[self.grammar_start : self.grammar_end]
-        result = self._retrieve_partition(query, keys, pool, self.grammar_k)
+        start, end = self.grammar_start, self.grammar_end
+        if self.is_distributed:
+            keys, pool = None, None
+        else:
+            keys = self.keys[start:end]
+            pool = self.pool[start:end]
+
+        result = self._retrieve_partition(
+            query, keys, pool, self.grammar_k, partition_range=(start, end)
+        )
         return self.output_proj(result)
 
     def retrieve_all(self, query: torch.Tensor) -> torch.Tensor:
         """Retrieve from entire pool (static shape)."""
-        result = self._retrieve_partition(query, self.keys, self.pool, self.all_k)
+        start, end = 0, self.pool_size
+        if self.is_distributed:
+            keys, pool = None, None
+        else:
+            keys = self.keys
+            pool = self.pool
+
+        result = self._retrieve_partition(
+            query, keys, pool, self.all_k, partition_range=(start, end)
+        )
         return self.output_proj(result)
 
     def retrieve(self, query: torch.Tensor, phase: PhaseType = "all") -> torch.Tensor:

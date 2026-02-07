@@ -1,0 +1,35 @@
+model:
+  vocab_size: 256
+  max_seq_len: 128
+  hidden_dim: 128
+  num_layers: 2
+  num_heads: 2
+  head_dim: 64
+  intermediate_dim: 512
+  dropout: 0.0
+  pool_size: 1024
+  pool_dim: 128
+  top_k: 128
+  retrieval_dim: 128
+  max_reasoning_steps: 4
+  act_threshold: 0.99
+  ponder_lambda: 0.01
+  knowledge_ratio: 0.7
+  reasoning_ratio: 0.2
+  grammar_ratio: 0.1
+
+training:
+  batch_size: 4
+  lr: 0.001
+  epochs: 1
+  seq_len: 32
+  recurrent_steps: 4
+  weight_decay: 0.01
+  generate_steps: 10
+  save_steps: 100
+
+dataset:
+  name: "synthetic"
+  streaming: false
+  column_name: "text"
+  prefetch_factor: 2
