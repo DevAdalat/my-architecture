@@ -200,15 +200,16 @@ def train():
             if step % 10 == 0 and global_rank == 0:
                 t1 = time.time()
                 dt = t1 - t0
+                if step == 0:
+                    dt = 1.0  # Avoid division by zero
                 t0 = t1
 
-                if step == 0:
-                    dt = 1.0
-
+                # Calculate metrics for the last 10 steps (or 1 for first step)
                 steps_elapsed = 10 if step > 0 else 1
 
                 tps = (batch_size * seq_len * steps_elapsed) / dt
 
+                # Estimate communication bandwidth (very rough)
                 mb_moved = (total_bytes_per_step_est * steps_elapsed) / 1e6
                 mbps = mb_moved / dt
 
@@ -217,6 +218,52 @@ def train():
                     f"TPS: {tps:7.1f} tok/s | "
                     f"Comm: {mbps:6.1f} MB/s (Est)"
                 )
+
+            if (
+                full_config.training.generate_steps > 0
+                and step > 0
+                and step % full_config.training.generate_steps == 0
+            ):
+                if global_rank == 0:
+                    print(f"\n[Step {step}] Generating sample...")
+
+                model.eval()
+                with torch.no_grad():
+                    prompt_ids = torch.tensor([[1, 10, 20, 30, 10]], dtype=torch.long).to(device)
+
+                    gen_len = 20
+                    curr_ids = prompt_ids
+
+                    for _ in range(gen_len):
+                        out = model(curr_ids)
+                        next_token = torch.argmax(out["logits"][:, -1, :], dim=-1, keepdim=True)
+                        curr_ids = torch.cat([curr_ids, next_token], dim=1)
+
+                    if global_rank == 0:
+                        print(f"Generated Tokens: {curr_ids[0].tolist()}")
+                        print(f"{'-' * 40}")
+
+                model.train()
+
+            if (
+                full_config.training.save_steps > 0
+                and step > 0
+                and step % full_config.training.save_steps == 0
+            ):
+                if global_rank == 0:
+                    print(f"\n[Step {step}] Saving checkpoint...")
+                    checkpoint_path = f"checkpoints/step_{step}.pt"
+                    torch.save(
+                        {
+                            "epoch": epoch,
+                            "step": step,
+                            "model_state_dict": model.state_dict(),
+                            "optimizer_state_dict": optimizer.state_dict(),
+                            "loss": loss.item(),
+                        },
+                        checkpoint_path,
+                    )
+                    print(f"Checkpoint saved to {checkpoint_path}")
 
             if args.steps and step >= args.steps:
                 break
