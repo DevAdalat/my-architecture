@@ -236,54 +236,41 @@ def train():
                 model.eval()
                 with torch.no_grad():
                     prompt_text = "Once upon a time"
-                    # Handle missing tokenizer
-                    if tokenizer:
-                        if global_rank == 0:
+
+                    if global_rank == 0:
+                        if tokenizer:
                             prompt_ids = tokenizer.encode(prompt_text, return_tensors="pt").to(
                                 device
                             )
                         else:
-                            prompt_ids = torch.zeros((1, 4), dtype=torch.long).to(device)
-
-                        proceed = torch.tensor(1, device=device)
+                            prompt_ids = torch.randint(0, config.vocab_size, (1, 4)).to(device)
                     else:
-                        proceed = torch.tensor(0, device=device)
                         prompt_ids = torch.zeros((1, 4), dtype=torch.long).to(device)
 
-                    dist.broadcast(proceed, src=0)
+                    dist.broadcast(prompt_ids, src=0)
 
-                    if proceed.item() == 1:
-                        if global_rank == 0 and tokenizer:
-                            prompt_ids = tokenizer.encode(prompt_text, return_tensors="pt").to(
-                                device
+                    gen_len = 20
+                    curr_ids = prompt_ids
+
+                    for _ in range(gen_len):
+                        out = model(curr_ids)
+                        temperature = 0.8
+                        logits = out["logits"][:, -1, :] / temperature
+                        probs = torch.softmax(logits, dim=-1)
+                        next_token = torch.multinomial(probs, num_samples=1)
+                        curr_ids = torch.cat([curr_ids, next_token], dim=1)
+
+                    if global_rank == 0:
+                        print(f"Generated IDs: {curr_ids[0].tolist()}")
+                        if tokenizer:
+                            decoded_text = tokenizer.decode(
+                                curr_ids[0].tolist(), skip_special_tokens=True
                             )
-                        elif global_rank != 0:
-                            prompt_ids = torch.zeros((1, 4), dtype=torch.long).to(device)
-
-                        dist.broadcast(prompt_ids, src=0)
-
-                        gen_len = 20
-                        curr_ids = prompt_ids
-
-                        for _ in range(gen_len):
-                            out = model(curr_ids)
-                            temperature = 0.8
-                            logits = out["logits"][:, -1, :] / temperature
-                            probs = torch.softmax(logits, dim=-1)
-                            next_token = torch.multinomial(probs, num_samples=1)
-                            curr_ids = torch.cat([curr_ids, next_token], dim=1)
-
-                        if global_rank == 0:
                             print(f'Prompt: "{prompt_text}"')
-                            print(f"Generated Tokens: {curr_ids[0].tolist()}")
-                            if tokenizer:
-                                decoded_text = tokenizer.decode(
-                                    curr_ids[0].tolist(), skip_special_tokens=True
-                                )
-                                print(f"Generated Text: {decoded_text}")
-                            print(f"{'-' * 40}")
-                    elif global_rank == 0:
-                        print("Skipping generation (no tokenizer)")
+                            print(f"Generated Text: {decoded_text}")
+                        else:
+                            print("(No tokenizer available for decoding - raw IDs shown)")
+                        print(f"{'-' * 40}")
 
                 model.train()
 
@@ -358,37 +345,44 @@ def train():
 
     model.eval()
 
-    if tokenizer:
-        prompt_text = "Once upon a time"
-        if global_rank == 0:
+    prompt_text = "Once upon a time"
+    if global_rank == 0:
+        if tokenizer:
             start_tokens = tokenizer.encode(prompt_text, return_tensors="pt").to(device)
         else:
-            start_tokens = torch.zeros((1, 4), dtype=torch.long).to(device)
+            start_tokens = torch.randint(0, config.vocab_size, (1, 4)).to(device)
+    else:
+        start_tokens = torch.zeros((1, 4), dtype=torch.long).to(device)
 
-        dist.broadcast(start_tokens, src=0)
+    dist.broadcast(start_tokens, src=0)
 
-        generated = start_tokens
-        max_new_tokens = 10
+    generated = start_tokens
+    max_new_tokens = 10
 
-        with torch.no_grad():
-            for _ in range(max_new_tokens):
-                outputs = model(generated)
-                next_token_logits = outputs["logits"][:, -1, :]
-                temperature = 0.8
-                logits = next_token_logits / temperature
-                probs = torch.softmax(logits, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1)
+    with torch.no_grad():
+        for _ in range(max_new_tokens):
+            outputs = model(generated)
+            next_token_logits = outputs["logits"][:, -1, :]
+            temperature = 0.8
+            logits = next_token_logits / temperature
+            probs = torch.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
 
-                dist.broadcast(next_token, src=0)
+            if global_rank != 0:
+                next_token = torch.zeros_like(next_token)
 
-                generated = torch.cat([generated, next_token], dim=1)
+            dist.broadcast(next_token, src=0)
 
-        if global_rank == 0:
+            generated = torch.cat([generated, next_token], dim=1)
+
+    if global_rank == 0:
+        print(f"Generated IDs: {generated[0].tolist()}")
+        if tokenizer:
             print(f"Input: {tokenizer.decode(start_tokens[0].tolist())}")
             print(f"Generated: {tokenizer.decode(generated[0].tolist())}")
-            print("=" * 40)
-    elif global_rank == 0:
-        print("Skipping Demo (no tokenizer)")
+        else:
+            print("(No tokenizer available for decoding - raw IDs shown)")
+        print("=" * 40)
 
     print(f"[Rank {global_rank}] Training Complete.")
     print(f"[Rank {global_rank}] Cleaning up distributed process group...")
