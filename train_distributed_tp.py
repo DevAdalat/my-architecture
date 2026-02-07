@@ -251,7 +251,9 @@ def train():
                     if global_rank == 0:
                         print(f"Generated Tokens: {curr_ids[0].tolist()}")
                         if tokenizer:
-                            decoded_text = tokenizer.decode(curr_ids[0], skip_special_tokens=True)
+                            decoded_text = tokenizer.decode(
+                                curr_ids[0].tolist(), skip_special_tokens=True
+                            )
                             print(f"Generated Text: {decoded_text}")
                         print(f"{'-' * 40}")
 
