@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import gc
 import os
 import sys
 import time
@@ -24,6 +25,7 @@ from src.data.synthetic import SyntheticDataset, collate_fn
 from src.model.config import DPSNRConfig
 from src.model.dpsn_r import DPSNR
 from src.utils.config_loader import load_config
+from src.utils.debug_tracer import tracer
 
 
 def parse_args():
@@ -154,105 +156,87 @@ def train():
         try:
             tokenizer = AutoTokenizer.from_pretrained(full_config.dataset.tokenizer_name)
         except Exception as e:
-            print(f"Warning: Could not load tokenizer for decoding: {e}")
+            print(f"[Rank {global_rank}] Warning: Could not load tokenizer: {e}")
 
-    print(f"[Rank {global_rank}] Starting Training Loop...")
+    total_loss = 0.0
+    start_time = time.time()
+    generate_steps = 50  # Generate text every 50 steps
 
-    # Metrics
-    seq_len = full_config.training.seq_len
-    batch_size = full_config.training.batch_size
-    recurrent_steps = full_config.training.recurrent_steps
+    if global_rank == 0:
+        print("Starting Training Loop...")
+    elif global_rank == 1:
+        # Give rank 0 a small head start for printing
+        time.sleep(0.5)
+        print("Starting Training Loop...")
 
-    num_epochs = full_config.training.epochs
-
-    candidates_per_step = world_size * config.top_k
-    bytes_scores = candidates_per_step * 4
-    bytes_indices = candidates_per_step * 8
-    bytes_vectors = candidates_per_step * config.pool_dim * 4
-
-    payload_per_token_pass = bytes_scores + bytes_indices + bytes_vectors
-    total_bytes_per_step_fwd = payload_per_token_pass * batch_size * seq_len * recurrent_steps
-    total_bytes_per_step_est = total_bytes_per_step_fwd * 2
-
-    t0 = time.time()
-
-    for epoch in range(num_epochs):
+    for epoch in range(full_config.training.epochs):
         if train_sampler:
             train_sampler.set_epoch(epoch)
-        model.train()
-        total_loss = 0.0
-        step = 0
 
         for step, batch in enumerate(train_loader):
-            inputs = batch["input_ids"].to(device)
-            targets = batch["labels"].to(device)
+            try:
+                tracer.update(f"ep{epoch}_step{step}_start")
+                inputs = batch["input_ids"].to(device)
+                targets = batch["labels"].to(device)
 
-            optimizer.zero_grad()
+                optimizer.zero_grad()
+                tracer.update(f"ep{epoch}_step{step}_zero_grad")
 
-            outputs = model(inputs)
+                # Forward Pass
+                outputs = model(inputs)
+                logits = outputs["logits"]
+                tracer.update(f"ep{epoch}_step{step}_forward_done")
 
-            logits = outputs["logits"]
-            loss = torch.nn.functional.cross_entropy(
-                logits.view(-1, config.vocab_size), targets.view(-1)
-            )
-
-            loss.backward()
-
-            for param in model.controller.parameters():
-                if param.grad is not None:
-                    dist.all_reduce(param.grad.data, op=dist.ReduceOp.SUM)
-                    param.grad.data /= world_size
-
-            optimizer.step()
-
-            # --- Explicit Memory Management to prevent OOM ---
-            # 1. Detach loss to free graph
-            loss_val = loss.item()
-            total_loss += loss_val
-
-            # 2. Delete graph-holding tensors
-            del outputs, loss, logits
-
-            # 3. Aggressive GC every 5 steps
-            if step % 5 == 0:
-                torch.cuda.empty_cache()
-                import gc
-
-                gc.collect()
-            # -------------------------------------------------
-
-            if step % 10 == 0 and global_rank == 0:
-                t1 = time.time()
-                dt = t1 - t0
-                if step == 0:
-                    dt = 1.0  # Avoid division by zero
-                t0 = t1
-
-                # Calculate metrics for the last 10 steps (or 1 for first step)
-                steps_elapsed = 10 if step > 0 else 1
-
-                tps = (batch_size * seq_len * steps_elapsed) / dt
-
-                # Estimate communication bandwidth (very rough)
-                mb_moved = (total_bytes_per_step_est * steps_elapsed) / 1e6
-                mbps = mb_moved / dt
-
-                print(
-                    f"Ep {epoch} | Step {step:3d} | Loss: {loss_val:.4f} | "
-                    f"TPS: {tps:7.1f} tok/s | "
-                    f"Comm: {mbps:6.1f} MB/s (Est)"
+                # Reshape for loss (Batch * Seq, Vocab)
+                loss = torch.nn.functional.cross_entropy(
+                    logits.view(-1, config.vocab_size), targets.view(-1)
                 )
 
-            if step > 0 and step % full_config.training.generate_steps == 0:
-                # Explicit cache clearing before generation to prevent OOM
-                torch.cuda.empty_cache()
+                # Backward Pass
+                loss.backward()
+                tracer.update(f"ep{epoch}_step{step}_backward_done")
 
-                if global_rank == 0:
-                    print(f"\n[Step {step}] Generating sample...")
+                # Manual Gradient Sync for Controller (since it's not DDP wrapped)
+                # We average gradients across all ranks
+                for param in model.controller.parameters():
+                    if param.grad is not None:
+                        dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+                        param.grad /= world_size
 
-                model.eval()
-                with torch.no_grad():
+                optimizer.step()
+                tracer.update(f"ep{epoch}_step{step}_opt_step")
+
+                loss_val = loss.item()
+                total_loss += loss_val
+
+                # Periodic Cleanup
+                del inputs, targets, outputs, logits, loss
+                if step % 5 == 0:
+                    torch.cuda.empty_cache()
+                    gc.collect()
+
+                if step % 10 == 0 and global_rank == 0:
+                    elapsed = time.time() - start_time
+                    tokens_per_sec = (
+                        (step + 1) * full_config.training.batch_size * full_config.training.seq_len
+                    ) / elapsed
+                    # Estimated communication overhead (crude metric)
+                    print(
+                        f"Ep {epoch} | Step {step:3d} | Loss: {loss_val:.4f} | TPS: {tokens_per_sec:7.1f} tok/s | Comm: {tokens_per_sec * config.pool_dim * 4 / 1e6:.1f} MB/s (Est)"
+                    )
+
+                # Periodic Generation (Rank 0 decodes, everyone participates in forward)
+                if step > 0 and step % generate_steps == 0:
+                    tracer.update(f"ep{epoch}_step{step}_before_gen")
+                    torch.cuda.empty_cache()
+
+                    if global_rank == 0:
+                        print(f"\n[Step {step}] Generating sample...")
+
+                    model.eval()
+
                     prompt_text = "Once upon a time"
+                    prompt_ids = None
 
                     if global_rank == 0:
                         if tokenizer:
@@ -269,13 +253,20 @@ def train():
                     gen_len = 20
                     curr_ids = prompt_ids
 
-                    for _ in range(gen_len):
-                        out = model(curr_ids)
-                        temperature = 0.8
-                        logits = out["logits"][:, -1, :] / temperature
-                        probs = torch.softmax(logits, dim=-1)
-                        next_token = torch.multinomial(probs, num_samples=1)
-                        curr_ids = torch.cat([curr_ids, next_token], dim=1)
+                    # Generate logic
+                    with torch.no_grad():
+                        for _ in range(gen_len):
+                            out = model(curr_ids)
+                            temperature = 0.8
+                            logits = out["logits"][:, -1, :] / temperature
+                            probs = torch.softmax(logits, dim=-1)
+                            next_token = torch.multinomial(probs, num_samples=1)
+
+                            if global_rank != 0:
+                                next_token = torch.zeros_like(next_token)
+
+                            dist.broadcast(next_token, src=0)
+                            curr_ids = torch.cat([curr_ids, next_token], dim=1)
 
                     if global_rank == 0:
                         print(f"Generated IDs: {curr_ids[0].tolist()}")
@@ -289,43 +280,48 @@ def train():
                             print("(No tokenizer available for decoding - raw IDs shown)")
                         print(f"{'-' * 40}")
 
-                # Cleanup generation artifacts and clear cache
-                del prompt_ids, curr_ids
-                if "out" in locals():
-                    del out
-                if "logits" in locals():
-                    del logits
-                if "probs" in locals():
-                    del probs
-                if "next_token" in locals():
-                    del next_token
+                    # Cleanup generation artifacts and clear cache
+                    del prompt_ids, curr_ids
+                    if "out" in locals():
+                        del out
+                    if "logits" in locals():
+                        del logits
+                    if "probs" in locals():
+                        del probs
+                    if "next_token" in locals():
+                        del next_token
 
-                torch.cuda.empty_cache()
+                    torch.cuda.empty_cache()
+                    tracer.update(f"ep{epoch}_step{step}_after_gen")
 
-                model.train()
+                    model.train()
 
-            if (
-                full_config.training.save_steps > 0
-                and step > 0
-                and step % full_config.training.save_steps == 0
-            ):
-                if global_rank == 0:
-                    print(f"\n[Step {step}] Saving checkpoint...")
-                    checkpoint_path = f"checkpoints/step_{step}.pt"
-                    torch.save(
-                        {
-                            "epoch": epoch,
-                            "step": step,
-                            "model_state_dict": model.state_dict(),
-                            "optimizer_state_dict": optimizer.state_dict(),
-                            "loss": loss_val,
-                        },
-                        checkpoint_path,
-                    )
-                    print(f"Checkpoint saved to {checkpoint_path}")
+                if (
+                    full_config.training.save_steps > 0
+                    and step > 0
+                    and step % full_config.training.save_steps == 0
+                ):
+                    if global_rank == 0:
+                        print(f"\n[Step {step}] Saving checkpoint...")
+                        checkpoint_path = f"checkpoints/step_{step}.pt"
+                        torch.save(
+                            {
+                                "epoch": epoch,
+                                "step": step,
+                                "model_state_dict": model.state_dict(),
+                                "optimizer_state_dict": optimizer.state_dict(),
+                                "loss": loss_val,
+                            },
+                            checkpoint_path,
+                        )
+                        print(f"Checkpoint saved to {checkpoint_path}")
 
-            if args.steps and step >= args.steps:
-                break
+                if args.steps and step >= args.steps:
+                    break
+            except Exception as e:
+                print(f"[Rank {global_rank}] Crash at step {step}: {e}")
+                tracer.dump(f"crash_dump_rank_{global_rank}.json")
+                raise e
 
         # Calculate training loss
         avg_loss = 0.0
