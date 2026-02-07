@@ -11,6 +11,7 @@ import os
 import sys
 import time
 from dataclasses import asdict
+from functools import partial
 
 # Ensure project root is in sys.path for distributed processes
 project_root = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +34,7 @@ def parse_args():
     parser.add_argument(
         "--config", type=str, default="configs/default.yaml", help="Path to YAML config file"
     )
+    parser.add_argument("--steps", type=int, default=None, help="Max steps per epoch (for testing)")
     return parser.parse_args()
 
 
@@ -60,7 +62,9 @@ def setup_distributed():
 
 
 def cleanup_distributed():
-    dist.destroy_process_group()
+    # On macOS with Gloo, destroy_process_group can hang for single-process runs
+    if sys.platform != "darwin":
+        dist.destroy_process_group()
 
 
 def train():
@@ -214,13 +218,28 @@ def train():
                     f"Comm: {mbps:6.1f} MB/s (Est)"
                 )
 
+            if args.steps and step >= args.steps:
+                break
+
+        # Calculate training loss
+        avg_loss = 0.0
+        try:
+            # If dataset has length
+            avg_loss = total_loss / len(train_loader)
+        except TypeError:
+            # If streaming/iterable
+            steps_taken = step + 1 if "step" in locals() else 1
+            avg_loss = total_loss / steps_taken
+
         if global_rank == 0:
-            print(f"Ep {epoch} | Training Avg Loss: {total_loss / len(train_loader):.4f}")
+            print(f"Ep {epoch} | Training Avg Loss: {avg_loss:.4f}")
 
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for batch in val_loader:
+            for i, batch in enumerate(val_loader):
+                if args.steps and i >= args.steps:
+                    break
                 inputs = batch["input_ids"].to(device)
                 targets = batch["labels"].to(device)
                 outputs = model(inputs)
@@ -230,7 +249,12 @@ def train():
                 )
                 val_loss += loss.item()
 
-        avg_val_loss = val_loss / len(val_loader)
+        try:
+            num_val_batches = len(val_loader)
+        except TypeError:
+            num_val_batches = args.steps if args.steps else 100  # Fallback
+
+        avg_val_loss = val_loss / num_val_batches
         val_loss_tensor = torch.tensor(avg_val_loss).to(device)
         dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
         avg_val_loss = val_loss_tensor.item() / world_size
@@ -271,7 +295,21 @@ def train():
         print("=" * 40)
 
     print(f"[Rank {global_rank}] Training Complete.")
-    cleanup_distributed()
+    print(f"[Rank {global_rank}] Cleaning up distributed process group...")
+    # On macOS with Gloo, destroy_process_group can hang.
+    # We set a timeout or force exit if it takes too long.
+    if sys.platform == "darwin" and dist.get_backend() == "gloo":
+        print(
+            f"[Rank {global_rank}] macOS/Gloo detected: skipping destroy_process_group to avoid hang."
+        )
+    else:
+        cleanup_distributed()
+    print(f"[Rank {global_rank}] Cleanup complete.")
+    # Force exit to kill any lingering background threads (e.g. from datasets streaming)
+    import os
+
+    os._exit(0)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

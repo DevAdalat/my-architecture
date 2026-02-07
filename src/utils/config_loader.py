@@ -11,11 +11,19 @@ class ModelConfig:
 
     vocab_size: int
     hidden_dim: int
+    num_layers: int
     num_heads: int
     head_dim: int
+    intermediate_dim: int
+    dropout: float
     pool_size: int
     pool_dim: int
     top_k: int
+    retrieval_dim: int
+    max_reasoning_steps: int
+    max_seq_len: int
+    act_threshold: float
+    ponder_lambda: float
     knowledge_ratio: float
     reasoning_ratio: float
     grammar_ratio: float

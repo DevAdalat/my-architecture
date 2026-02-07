@@ -1,0 +1,45 @@
+model:
+  # Vocabulary and Sequence
+  vocab_size: 32000
+  max_seq_len: 2048
+
+  # Controller Architecture (1.0B total params with pool)
+  # Hidden dimensions must be multiples of 128 for TPU efficiency
+  hidden_dim: 1536          # 12 * 128
+  num_layers: 12
+  num_heads: 24             # head_dim = 64
+  head_dim: 64
+  intermediate_dim: 6144    # 4 * hidden_dim
+  dropout: 0.1
+
+  # Parameter Pool (~615M params)
+  pool_size: 600000         # 600k vectors
+  pool_dim: 768             # 6 * 128 (Half of hidden_dim)
+  top_k: 1024               # 8 * 128
+  retrieval_dim: 256        # 2 * 128
+
+  # Recurrent Reasoning & ACT
+  max_reasoning_steps: 16   # Increased depth for larger model
+  act_threshold: 0.99
+  ponder_lambda: 0.01
+
+  # Pool Partition Ratios
+  knowledge_ratio: 0.7
+  reasoning_ratio: 0.2
+  grammar_ratio: 0.1
+
+training:
+  batch_size: 8             # Reduced for larger model memory footprint
+  lr: 0.00005               # Lower learning rate for stability
+  epochs: 3
+  seq_len: 512
+  recurrent_steps: 16
+  weight_decay: 0.01
+
+dataset:
+  name: "roneneldan/TinyStories"
+  config_name: null
+  streaming: false
+  column_name: "text"
+  tokenizer_name: "gpt2"
+  prefetch_factor: 2

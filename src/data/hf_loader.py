@@ -45,8 +45,9 @@ def get_hf_dataloader(config: DatasetConfig, training_config: TrainingConfig) ->
     Returns:
         A PyTorch DataLoader.
     """
-    # Load the dataset from HuggingFace
+    print(f"Loading dataset {config.name} (streaming={config.streaming})...")
     dataset_raw = load_dataset(config.name, name=config.config_name, streaming=config.streaming)
+    print("Dataset loaded.")
 
     # Use 'train' split by default if it's a DatasetDict or IterableDatasetDict
     dataset: Any
@@ -60,7 +61,9 @@ def get_hf_dataloader(config: DatasetConfig, training_config: TrainingConfig) ->
         dataset = dataset_raw
 
     if config.tokenizer_name:
+        print(f"Loading tokenizer {config.tokenizer_name}...")
         tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
+        print("Tokenizer loaded.")
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
     else:
