@@ -27,6 +27,7 @@ class ModelConfig:
     knowledge_ratio: float
     reasoning_ratio: float
     grammar_ratio: float
+    gradient_checkpointing: bool = False
 
 
 @dataclass
