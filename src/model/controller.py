@@ -113,7 +113,10 @@ class MultiHeadAttention(nn.Module):
 
         # Use precomputed causal mask (slice to current seq_len)
         mask = self.causal_mask[:seq_len, :seq_len]
-        attn_weights = attn_weights.masked_fill(mask.unsqueeze(0).unsqueeze(0), -1e9)
+
+        # Use min value for current dtype to avoid overflow in float16
+        min_value = torch.finfo(attn_weights.dtype).min
+        attn_weights = attn_weights.masked_fill(mask.unsqueeze(0).unsqueeze(0), min_value)
 
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
