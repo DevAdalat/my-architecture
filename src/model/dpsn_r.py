@@ -10,6 +10,7 @@ XLA Compliance:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from .act import AdaptiveComputeTime, compute_ponder_loss
 from .config import DPSNRConfig
@@ -64,6 +65,12 @@ class DPSNR(nn.Module):
 
         hidden = self.controller.encode(input_ids, step=0)
 
+        # Helper for gradient checkpointing
+        def run_step(step_fn, h):
+            if self.config.gradient_checkpointing and self.training:
+                return checkpoint(step_fn, h, use_reentrant=False)
+            return step_fn(h)
+
         if use_act:
             acc = self.act.init_state(
                 batch_size,
@@ -77,46 +84,46 @@ class DPSNR(nn.Module):
             # Step 0: knowledge phase
             halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
             acc = self.act.step(hidden, halt_prob, acc, 0)
-            hidden = self._step_knowledge(hidden)
+            hidden = run_step(self._step_knowledge, hidden)
 
             # Step 1: knowledge phase
             halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
             acc = self.act.step(hidden, halt_prob, acc, 1)
-            hidden = self._step_knowledge(hidden)
+            hidden = run_step(self._step_knowledge, hidden)
 
             # Step 2: reasoning phase
             halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
             acc = self.act.step(hidden, halt_prob, acc, 2)
-            hidden = self._step_reasoning(hidden)
+            hidden = run_step(self._step_reasoning, hidden)
 
             # Step 3: reasoning phase
             halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
             acc = self.act.step(hidden, halt_prob, acc, 3)
-            hidden = self._step_reasoning(hidden)
+            hidden = run_step(self._step_reasoning, hidden)
 
             # Step 4: reasoning phase (for max_steps >= 5)
             if self.config.max_reasoning_steps >= 5:
                 halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
                 acc = self.act.step(hidden, halt_prob, acc, 4)
-                hidden = self._step_reasoning(hidden)
+                hidden = run_step(self._step_reasoning, hidden)
 
             # Step 5: reasoning phase (for max_steps >= 6)
             if self.config.max_reasoning_steps >= 6:
                 halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
                 acc = self.act.step(hidden, halt_prob, acc, 5)
-                hidden = self._step_reasoning(hidden)
+                hidden = run_step(self._step_reasoning, hidden)
 
             # Step 6: grammar phase (for max_steps >= 7)
             if self.config.max_reasoning_steps >= 7:
                 halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
                 acc = self.act.step(hidden, halt_prob, acc, 6)
-                hidden = self._step_grammar(hidden)
+                hidden = run_step(self._step_grammar, hidden)
 
             # Step 7: grammar phase (for max_steps >= 8)
             if self.config.max_reasoning_steps >= 8:
                 halt_prob = self.controller.predict_halt(hidden).squeeze(-1)
                 acc = self.act.step(hidden, halt_prob, acc, 7)
-                hidden = self._step_grammar(hidden)
+                hidden = run_step(self._step_grammar, hidden)
 
             hidden, ponder_cost, _ = self.act.finalize(hidden, acc)
         else:
@@ -128,18 +135,18 @@ class DPSNR(nn.Module):
             )
 
             # Fixed steps without ACT - use direct partition calls
-            hidden = self._step_knowledge(hidden)
-            hidden = self._step_knowledge(hidden)
-            hidden = self._step_reasoning(hidden)
-            hidden = self._step_reasoning(hidden)
+            hidden = run_step(self._step_knowledge, hidden)
+            hidden = run_step(self._step_knowledge, hidden)
+            hidden = run_step(self._step_reasoning, hidden)
+            hidden = run_step(self._step_reasoning, hidden)
             if self.config.max_reasoning_steps >= 5:
-                hidden = self._step_reasoning(hidden)
+                hidden = run_step(self._step_reasoning, hidden)
             if self.config.max_reasoning_steps >= 6:
-                hidden = self._step_reasoning(hidden)
+                hidden = run_step(self._step_reasoning, hidden)
             if self.config.max_reasoning_steps >= 7:
-                hidden = self._step_grammar(hidden)
+                hidden = run_step(self._step_grammar, hidden)
             if self.config.max_reasoning_steps >= 8:
-                hidden = self._step_grammar(hidden)
+                hidden = run_step(self._step_grammar, hidden)
 
         logits = self.controller.decode(hidden)
 

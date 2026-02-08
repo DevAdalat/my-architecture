@@ -56,6 +56,7 @@ class DPSNRConfig:
     max_reasoning_steps: int = 8
     act_threshold: float = 0.99
     ponder_lambda: float = 0.01
+    gradient_checkpointing: bool = False
 
     # Pool partitions (ratios)
     knowledge_ratio: float = 0.7

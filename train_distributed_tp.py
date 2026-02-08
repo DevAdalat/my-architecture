@@ -17,6 +17,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, DistributedSampler
 from transformers import AutoTokenizer
 
@@ -111,6 +112,7 @@ def train():
 
     # 6. Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=full_config.training.lr)
+    scaler = GradScaler(enabled=(device == "cuda"))
 
     # 7. Data Loader
     if full_config.dataset.name == "synthetic":
@@ -182,19 +184,23 @@ def train():
                 optimizer.zero_grad()
                 tracer.update(f"ep{epoch}_step{step}_zero_grad")
 
-                # Forward Pass
-                outputs = model(inputs)
-                logits = outputs["logits"]
-                tracer.update(f"ep{epoch}_step{step}_forward_done")
+                # Forward Pass with AMP
+                with autocast(enabled=(device == "cuda")):
+                    outputs = model(inputs)
+                    logits = outputs["logits"]
+                    tracer.update(f"ep{epoch}_step{step}_forward_done")
 
-                # Reshape for loss (Batch * Seq, Vocab)
-                loss = torch.nn.functional.cross_entropy(
-                    logits.view(-1, config.vocab_size), targets.view(-1)
-                )
+                    # Reshape for loss (Batch * Seq, Vocab)
+                    loss = torch.nn.functional.cross_entropy(
+                        logits.view(-1, config.vocab_size), targets.view(-1)
+                    )
 
-                # Backward Pass
-                loss.backward()
+                # Backward Pass with Scaler
+                scaler.scale(loss).backward()
                 tracer.update(f"ep{epoch}_step{step}_backward_done")
+
+                # Unscale gradients before manual sync/clipping
+                scaler.unscale_(optimizer)
 
                 # Manual Gradient Sync for Controller (since it's not DDP wrapped)
                 # We average gradients across all ranks
@@ -203,7 +209,11 @@ def train():
                         dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
                         param.grad /= world_size
 
-                optimizer.step()
+                # Optional: Clip gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+                scaler.step(optimizer)
+                scaler.update()
                 tracer.update(f"ep{epoch}_step{step}_opt_step")
 
                 loss_val = loss.item()
